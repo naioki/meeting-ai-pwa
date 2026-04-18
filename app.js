@@ -9,10 +9,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let recognition = null;
     let fullTranscript = "";
     let lastAdviceIndex = 0; // The index in fullTranscript where we last sent to AI
+    let isFetchingAdvice = false;
+    let restartTimeout = null;
 
     // --- DOM Elements ---
     const startBtn = document.getElementById('startBtn');
     const endBtn = document.getElementById('endBtn');
+    const recordingStatusIndicator = document.getElementById('recordingStatusIndicator');
     const settingsBtn = document.getElementById('settingsBtn');
     const settingsModal = document.getElementById('settingsModal');
     const closeSettingsBtn = document.getElementById('closeSettingsBtn');
@@ -39,6 +42,36 @@ document.addEventListener('DOMContentLoaded', () => {
     initPWA();
 
     // --- Functions ---
+    function updateStatus(status, type = 'normal') {
+        if (!recordingStatusIndicator) return;
+        recordingStatusIndicator.classList.remove('hidden', 'bg-gray-200', 'text-gray-600', 'bg-red-100', 'text-red-700', 'bg-blue-100', 'text-blue-700', 'bg-yellow-100', 'text-yellow-700');
+        
+        recordingStatusIndicator.textContent = status;
+        
+        switch(type) {
+            case 'recording':
+                recordingStatusIndicator.classList.add('bg-red-100', 'text-red-700');
+                break;
+            case 'active':
+                recordingStatusIndicator.classList.add('bg-blue-100', 'text-blue-700');
+                break;
+            case 'error':
+                recordingStatusIndicator.classList.add('bg-yellow-100', 'text-yellow-700');
+                break;
+            default:
+                recordingStatusIndicator.classList.add('bg-gray-200', 'text-gray-600');
+                if (status === '待機中' || status === '') recordingStatusIndicator.classList.add('hidden');
+        }
+    }
+
+    function endMeetingUI() {
+        isRecording = false;
+        clearTimeout(restartTimeout);
+        endBtn.classList.add('hidden');
+        startBtn.classList.remove('hidden');
+        updateStatus('待機中', 'normal');
+    }
+
     function initPWA() {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js')
@@ -86,6 +119,18 @@ document.addEventListener('DOMContentLoaded', () => {
         recognition.interimResults = true;
         recognition.lang = 'ja-JP';
 
+        recognition.onstart = () => {
+            updateStatus('🔴 録音中', 'recording');
+        };
+
+        recognition.onaudiostart = () => {
+            updateStatus('🎙️ 音声検知中...', 'active');
+        };
+
+        recognition.onsoundend = () => {
+            updateStatus('🔴 録音中', 'recording');
+        };
+
         recognition.onresult = (event) => {
             let interimTranscript = '';
             let finalTranscriptSegment = '';
@@ -109,18 +154,37 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         recognition.onerror = (event) => {
-            console.error('Speech recognition error', event.error);
+            console.error('Speech recognition error:', event.error);
+            if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                updateStatus('マイクアクセス拒否', 'error');
+                isRecording = false; // Stop auto-restarting permanently
+                addAdviceToUI('⚠️ マイクへのアクセスが許可されていません。ブラウザの設定からマイクの権限をオンにし、ページを更新して再試行してください。', 'system');
+                endMeetingUI();
+            } else if (event.error === 'network') {
+                updateStatus('ネットワークエラー', 'error');
+            } else if (event.error === 'no-speech') {
+                updateStatus('無音...再接続中', 'error');
+            } else {
+                updateStatus(`エラー: ${event.error}`, 'error');
+            }
         };
 
         recognition.onend = () => {
             // Auto-restart if we are supposed to be recording
             if (isRecording) {
                 console.log('Restarting speech recognition...');
-                try {
-                    recognition.start();
-                } catch(e) {
-                    console.error("Failed to restart recognition:", e);
-                }
+                updateStatus('再接続中...', 'error');
+                clearTimeout(restartTimeout);
+                restartTimeout = setTimeout(() => {
+                    try {
+                        recognition.start();
+                    } catch(e) {
+                        console.error("Failed to restart recognition:", e);
+                        // Make sure we update UI if it permanently fails
+                    }
+                }, 1000); // 1秒おいてから再起動（無限ループクラッシュ防止）
+            } else {
+                updateStatus('待機中', 'normal');
             }
         };
     }
@@ -150,12 +214,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     endBtn.addEventListener('click', async () => {
-        isRecording = false;
-        recognition.stop();
+        endMeetingUI();
+        if (recognition) {
+            try {
+                recognition.stop();
+            } catch(e) {}
+        }
         
-        endBtn.classList.add('hidden');
-        startBtn.classList.remove('hidden');
-
         if (fullTranscript.trim().length > 0) {
             await finishMeeting();
         } else {
@@ -185,13 +250,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function checkAndFetchAdvice() {
+        // すでにAPIを叩いている最中なら重複して送らない
+        if (isFetchingAdvice) return;
+
         const newText = fullTranscript.substring(lastAdviceIndex);
         if (newText.length >= ADVICE_THRESHOLD_CHARS) {
+            isFetchingAdvice = true;
             const contextToSend = fullTranscript;
             lastAdviceIndex = fullTranscript.length;
             
             const loadingIndicator = addAdviceToUI("✨ AIがアドバイスを検討中...", "system");
             await callGeminiForAdvice(contextToSend, loadingIndicator);
+            
+            isFetchingAdvice = false;
+            // もしAPI通信中にさらに50文字以上溜まっていたら再帰的に処理する
+            checkAndFetchAdvice();
         }
     }
 
