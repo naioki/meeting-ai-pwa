@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Constants & Defaults ---
     const DEFAULT_REALTIME_PROMPT = "あなたは優秀なビジネスコンサルタントです。送られた会話の内容から、次に深掘りすべき質問や、議論のズレに対する指摘を、簡潔に2〜3行のテキストで提示してください。";
     const DEFAULT_MINUTES_PROMPT = "以下の会議ログを、B2BコーポレートサイトやヘッドレスCMSにそのまま流し込めるように、厳密に構造化されたMarkdown形式（## や - を使用）で議事録として要約してください。余計な挨拶や前置きは不要です。";
-    const ADVICE_THRESHOLD_CHARS = 100;
+    const ADVICE_THRESHOLD_CHARS = 50; // より頻繁にアドバイスを出すために50文字に短縮
 
     // --- State ---
     let isRecording = false;
@@ -181,20 +181,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         aiAdviceContent.prepend(div);
+        return div;
     }
 
     async function checkAndFetchAdvice() {
         const newText = fullTranscript.substring(lastAdviceIndex);
         if (newText.length >= ADVICE_THRESHOLD_CHARS) {
-            // Include a chunk of recent transcript instead of the entire thing to avoid gigantic prompt tokens over time?
-            // Actually, for better context, full transcript is usually fine until it hits the model limits.
             const contextToSend = fullTranscript;
             lastAdviceIndex = fullTranscript.length;
-            await callGeminiForAdvice(contextToSend);
+            
+            const loadingIndicator = addAdviceToUI("✨ AIがアドバイスを検討中...", "system");
+            await callGeminiForAdvice(contextToSend, loadingIndicator);
         }
     }
 
-    async function callGeminiForAdvice(transcript) {
+    async function callGeminiForAdvice(transcript, loadingIndicator) {
         const apiKey = localStorage.getItem('geminiApiKey');
         const prompt = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
         
@@ -216,13 +217,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 })
             });
 
-            if (!response.ok) throw new Error(`API Error: ${response.status}`);
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                console.error("API Response Error:", errorData);
+                throw new Error(`API通信エラー (${response.status}): APIキー設定等が正しいかご確認ください。`);
+            }
             
             const data = await response.json();
+            if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
+                throw new Error("AIから有効な回答が得られませんでした。");
+            }
+            
+            if (loadingIndicator && loadingIndicator.parentNode) {
+                loadingIndicator.parentNode.removeChild(loadingIndicator);
+            }
+
             const textResponse = data.candidates[0].content.parts[0].text;
             addAdviceToUI(textResponse);
         } catch(e) {
             console.error("Gemini API Error for advice:", e);
+            if (loadingIndicator && loadingIndicator.parentNode) {
+                loadingIndicator.parentNode.removeChild(loadingIndicator);
+            }
+            addAdviceToUI(`⚠️ AIアドバイス取得エラー:\n${e.message}`, "system");
         }
     }
 
