@@ -286,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         try {
             // Using flash for faster real-time response
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash:generateContent?key=${apiKey}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -341,8 +341,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const webhookUrl = localStorage.getItem('webhookUrl');
 
         try {
-            // Using pro for better reasoning and structuring
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`, {
+            // Using flash 3.1 for high capacity and fast response
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash:generateContent?key=${apiKey}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
