@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ai-meeting-v1';
+const CACHE_NAME = 'ai-meeting-v3';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -37,8 +37,20 @@ self.addEventListener('fetch', (event) => {
   // Exclude API calls like the Gemini API
   if (event.request.url.includes('googleapis.com')) return;
   
+  // Network-First strategy
   event.respondWith(
-    caches.match(event.request)
-      .then((response) => response || fetch(event.request))
+    fetch(event.request).then((response) => {
+      // If we got a valid response, clone it and cache it for offline use
+      if(response && response.status === 200 && response.type === 'basic') {
+          let responseClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseClone);
+          });
+      }
+      return response;
+    }).catch(function() {
+      // Fallback to cache if offline
+      return caches.match(event.request);
+    })
   );
 });
