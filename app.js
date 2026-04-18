@@ -285,8 +285,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const prompt = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
         
         try {
-            // Using flash for faster real-time response
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
+            // Using flash lite for maximum speed and free-tier volume
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -341,8 +341,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const webhookUrl = localStorage.getItem('webhookUrl');
 
         try {
-            // Using flash for high capacity and fast response
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
+            // Using flash lite for cost-effectiveness and high capacity
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
