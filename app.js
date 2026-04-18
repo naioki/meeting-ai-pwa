@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Constants & Defaults ---
     const DEFAULT_REALTIME_PROMPT = "あなたは優秀なビジネスコンサルタントです。送られた会話の内容から、次に深掘りすべき質問や、議論のズレに対する指摘を、簡潔に2〜3行のテキストで提示してください。";
     const DEFAULT_MINUTES_PROMPT = "以下の会議ログを、B2BコーポレートサイトやヘッドレスCMSにそのまま流し込めるように、厳密に構造化されたMarkdown形式（## や - を使用）で議事録として要約してください。余計な挨拶や前置きは不要です。";
-    const ADVICE_THRESHOLD_CHARS = 50; // より頻繁にアドバイスを出すために50文字に短縮
+    const ADVICE_THRESHOLD_CHARS = 200; // API制限（429エラー）を回避するため200文字に増大
 
     // --- State ---
     let isRecording = false;
