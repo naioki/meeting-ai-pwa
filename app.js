@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- DOM Elements ---
     const startBtn = document.getElementById('startBtn');
     const endBtn = document.getElementById('endBtn');
+    const midwaySummaryBtn = document.getElementById('midwaySummaryBtn');
     const recordingStatusIndicator = document.getElementById('recordingStatusIndicator');
     const settingsBtn = document.getElementById('settingsBtn');
     const settingsModal = document.getElementById('settingsModal');
@@ -32,6 +33,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const loadingOverlay = document.getElementById('loadingOverlay');
     const minutesModal = document.getElementById('minutesModal');
+    const minutesModalTitle = document.getElementById('minutesModalTitle');
     const closeMinutesBtn = document.getElementById('closeMinutesBtn');
     const minutesOutput = document.getElementById('minutesOutput');
     const copyMinutesBtn = document.getElementById('copyMinutesBtn');
@@ -68,6 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
         isRecording = false;
         clearTimeout(restartTimeout);
         endBtn.classList.add('hidden');
+        midwaySummaryBtn.classList.add('hidden');
         startBtn.classList.remove('hidden');
         updateStatus('待機中', 'normal');
     }
@@ -204,12 +207,21 @@ document.addEventListener('DOMContentLoaded', () => {
         isRecording = true;
         startBtn.classList.add('hidden');
         endBtn.classList.remove('hidden');
+        midwaySummaryBtn.classList.remove('hidden');
         
         try {
             recognition.start();
             addAdviceToUI("会議を開始しました。文字起こしが一定量溜まると、自動でアドバイスが表示されます...", "system");
         } catch(e) {
             console.error(e);
+        }
+    });
+
+    midwaySummaryBtn.addEventListener('click', async () => {
+        if (fullTranscript.trim().length > 0) {
+            await generateSummary(false);
+        } else {
+            alert("文字起こしされたテキストが存在しないため、要約は生成されません。");
         }
     });
 
@@ -222,7 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         if (fullTranscript.trim().length > 0) {
-            await finishMeeting();
+            await generateSummary(true);
         } else {
             alert("文字起こしされたテキストが存在しないため、議事録は生成されません。");
         }
@@ -316,7 +328,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    async function finishMeeting() {
+    async function generateSummary(isFinal) {
+        let loadingText = loadingOverlay.querySelector('p');
+        if(loadingText) {
+            loadingText.textContent = isFinal ? "議事録を生成・送信しています..." : "途中要約を生成しています...";
+        }
         loadingOverlay.classList.remove('hidden');
         loadingOverlay.classList.add('flex');
         
@@ -346,11 +362,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const minutesMarkdown = data.candidates[0].content.parts[0].text;
 
             // Show minutes modal
+            minutesModalTitle.textContent = isFinal ? "生成された議事録" : "途中要約";
             minutesOutput.textContent = minutesMarkdown;
             minutesModal.classList.remove('hidden');
 
-            // Send to Webhook if configured
-            if (webhookUrl) {
+            // Send to Webhook if configured and it is the final meeting summary
+            if (isFinal && webhookUrl) {
                 await fetch(webhookUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -370,10 +387,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Minutes Modal actions
     closeMinutesBtn.addEventListener('click', () => {
         minutesModal.classList.add('hidden');
-        // Reset state for next meeting
-        transcriptContent.innerHTML = "";
-        aiAdviceContent.innerHTML = "";
-        fullTranscript = "";
+        
+        // Reset state only if recording has stopped (i.e. final minutes)
+        if (!isRecording) {
+            transcriptContent.innerHTML = "";
+            aiAdviceContent.innerHTML = "";
+            fullTranscript = "";
+            lastAdviceIndex = 0;
+            updateStatus('待機中', 'normal');
+        }
     });
 
     copyMinutesBtn.addEventListener('click', () => {
