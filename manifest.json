@@ -1,8 +1,10 @@
 {
   "name": "AI Meeting Assistant",
   "short_name": "AI Meeting",
+  "lang": "ja",
   "description": "リアルタイムでアシストする議事録作成PWA",
-  "start_url": "./index.html",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#f9fafb",
   "theme_color": "#3b82f6",
@@ -10,12 +12,14 @@
     {
       "src": "icon.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     },
     {
       "src": "icon.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
     }
   ]
 }

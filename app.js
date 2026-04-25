@@ -2,15 +2,20 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Constants & Defaults ---
     const DEFAULT_REALTIME_PROMPT = "あなたは優秀なビジネスコンサルタントです。送られた会話の内容から、次に深掘りすべき質問や、議論のズレに対する指摘を、簡潔に2〜3行のテキストで提示してください。";
     const DEFAULT_MINUTES_PROMPT = "以下の会議ログを、B2BコーポレートサイトやヘッドレスCMSにそのまま流し込めるように、厳密に構造化されたMarkdown形式（## や - を使用）で議事録として要約してください。余計な挨拶や前置きは不要です。";
-    const ADVICE_THRESHOLD_CHARS = 200; // API制限（429エラー）を回避するため200文字に増大
+    const ADVICE_THRESHOLD_CHARS = 200;
+    const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+    const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+    const API_TIMEOUT_MS = 30000;
+    const MAX_RESTART_ATTEMPTS = 10;
 
     // --- State ---
     let isRecording = false;
     let recognition = null;
     let fullTranscript = "";
-    let lastAdviceIndex = 0; // The index in fullTranscript where we last sent to AI
+    let lastAdviceIndex = 0;
     let isFetchingAdvice = false;
     let restartTimeout = null;
+    let restartCount = 0;
 
     // --- DOM Elements ---
     const startBtn = document.getElementById('startBtn');
@@ -21,8 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsModal = document.getElementById('settingsModal');
     const closeSettingsBtn = document.getElementById('closeSettingsBtn');
     const settingsForm = document.getElementById('settingsForm');
-    
-    // Settings inputs
+
     const apiKeyInput = document.getElementById('apiKeyInput');
     const webhookUrlInput = document.getElementById('webhookUrlInput');
     const realtimePromptInput = document.getElementById('realtimePromptInput');
@@ -30,27 +34,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const transcriptContent = document.getElementById('transcriptContent');
     const aiAdviceContent = document.getElementById('aiAdviceContent');
-    
+
     const loadingOverlay = document.getElementById('loadingOverlay');
     const minutesModal = document.getElementById('minutesModal');
     const minutesModalTitle = document.getElementById('minutesModalTitle');
     const closeMinutesBtn = document.getElementById('closeMinutesBtn');
     const minutesOutput = document.getElementById('minutesOutput');
     const copyMinutesBtn = document.getElementById('copyMinutesBtn');
+    const downloadMinutesBtn = document.getElementById('downloadMinutesBtn');
 
     // --- Initialization ---
     initSettings();
     initSpeechRecognition();
     initPWA();
 
-    // --- Functions ---
+    // --- Utility ---
+
     function updateStatus(status, type = 'normal') {
         if (!recordingStatusIndicator) return;
-        recordingStatusIndicator.classList.remove('hidden', 'bg-gray-200', 'text-gray-600', 'bg-red-100', 'text-red-700', 'bg-blue-100', 'text-blue-700', 'bg-yellow-100', 'text-yellow-700');
-        
+        recordingStatusIndicator.classList.remove(
+            'hidden', 'bg-gray-200', 'text-gray-600',
+            'bg-red-100', 'text-red-700',
+            'bg-blue-100', 'text-blue-700',
+            'bg-yellow-100', 'text-yellow-700'
+        );
         recordingStatusIndicator.textContent = status;
-        
-        switch(type) {
+        switch (type) {
             case 'recording':
                 recordingStatusIndicator.classList.add('bg-red-100', 'text-red-700');
                 break;
@@ -66,8 +75,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function showToast(message, duration = 4000) {
+        const toast = document.createElement('div');
+        toast.className = 'fixed bottom-4 left-1/2 -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg z-[100] text-sm pointer-events-none';
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), duration);
+    }
+
     function endMeetingUI() {
         isRecording = false;
+        restartCount = 0;
         clearTimeout(restartTimeout);
         endBtn.classList.add('hidden');
         midwaySummaryBtn.classList.add('hidden');
@@ -75,28 +93,100 @@ document.addEventListener('DOMContentLoaded', () => {
         updateStatus('待機中', 'normal');
     }
 
+    function scrollToBottom(container) {
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function addAdviceToUI(text, type = "ai") {
+        const div = document.createElement('div');
+        div.className = `p-4 rounded-xl advice-item ${type === 'system' ? 'bg-gray-100 text-gray-500 text-base' : 'bg-blue-50 border border-blue-200 text-blue-900 shadow-sm'}`;
+
+        if (type === 'ai') {
+            const header = document.createElement('div');
+            header.className = 'font-bold text-sm text-blue-600 mb-2 flex items-center';
+            // Static hardcoded SVG — safe to use innerHTML here
+            header.innerHTML = `<svg class="w-5 h-5 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" /></svg>AI Assistant`;
+            const content = document.createElement('div');
+            content.style.whiteSpace = 'pre-wrap';
+            content.textContent = text; // Safe: never use innerHTML for AI/user text
+            div.append(header, content);
+        } else {
+            div.textContent = text;
+        }
+
+        aiAdviceContent.prepend(div);
+        return div;
+    }
+
+    // --- Gemini API ---
+
+    function getApiErrorMessage(status, errorData) {
+        const detail = errorData?.error?.message ? ` (${errorData.error.message})` : '';
+        if (status === 400) return `リクエストエラー${detail}`;
+        if (status === 401 || status === 403) return 'APIキーが無効または権限がありません。設定を確認してください。';
+        if (status === 429) return 'APIのレート制限に達しました。しばらく待ってから再試行してください。';
+        if (status === 404) return 'APIエンドポイントが見つかりません。モデル名またはAPIバージョンを確認してください。';
+        if (status >= 500) return `Gemini APIサーバーエラー (${status})。時間をおいて再試行してください。`;
+        return `APIエラー (${status})`;
+    }
+
+    async function callGeminiAPI(prompt, { temperature = 0.7, maxOutputTokens = 500 } = {}) {
+        const apiKey = localStorage.getItem('geminiApiKey');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+        try {
+            const response = await fetch(
+                `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: controller.signal,
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { temperature, maxOutputTokens }
+                    })
+                }
+            );
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(getApiErrorMessage(response.status, errorData));
+            }
+
+            const data = await response.json();
+            const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!text) throw new Error('AIから有効な回答が得られませんでした。');
+            return text;
+        } catch (e) {
+            if (e.name === 'AbortError') throw new Error('APIリクエストがタイムアウトしました（30秒）。');
+            throw e;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
+    // --- Setup ---
+
     function initPWA() {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.register('sw.js')
-                .then(reg => console.log('Service Worker Registered'))
-                .catch(err => console.error('Service Worker Error', err));
+                .then(() => console.log('Service Worker Registered'))
+                .catch((err) => console.error('Service Worker Error', err));
         }
     }
 
     function initSettings() {
-        // Load from LocalStorage
         apiKeyInput.value = localStorage.getItem('geminiApiKey') || '';
         webhookUrlInput.value = localStorage.getItem('webhookUrl') || '';
         realtimePromptInput.value = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
         minutesPromptInput.value = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
 
         if (!apiKeyInput.value) {
-            // Show settings if API key is missing
             settingsModal.classList.remove('hidden');
         }
     }
 
-    // Save Settings
     settingsForm.addEventListener('submit', (e) => {
         e.preventDefault();
         localStorage.setItem('geminiApiKey', apiKeyInput.value.trim());
@@ -104,9 +194,9 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.setItem('realtimePrompt', realtimePromptInput.value.trim());
         localStorage.setItem('minutesPrompt', minutesPromptInput.value.trim());
         settingsModal.classList.add('hidden');
+        showToast('設定を保存しました。');
     });
 
-    // Modal toggles
     settingsBtn.addEventListener('click', () => settingsModal.classList.remove('hidden'));
     closeSettingsBtn.addEventListener('click', () => settingsModal.classList.add('hidden'));
 
@@ -122,17 +212,9 @@ document.addEventListener('DOMContentLoaded', () => {
         recognition.interimResults = true;
         recognition.lang = 'ja-JP';
 
-        recognition.onstart = () => {
-            updateStatus('🔴 録音中', 'recording');
-        };
-
-        recognition.onaudiostart = () => {
-            updateStatus('🎙️ 音声検知中...', 'active');
-        };
-
-        recognition.onsoundend = () => {
-            updateStatus('🔴 録音中', 'recording');
-        };
+        recognition.onstart = () => updateStatus('🔴 録音中', 'recording');
+        recognition.onaudiostart = () => updateStatus('🎙️ 音声検知中...', 'active');
+        recognition.onsoundend = () => updateStatus('🔴 録音中', 'recording');
 
         recognition.onresult = (event) => {
             let interimTranscript = '';
@@ -147,12 +229,19 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (finalTranscriptSegment) {
-               fullTranscript += finalTranscriptSegment + " ";
-               checkAndFetchAdvice();
+                fullTranscript += finalTranscriptSegment + " ";
+                restartCount = 0; // Reset on successful recognition
+                checkAndFetchAdvice();
             }
 
-            // Update UI with bold text for visibility
-            transcriptContent.innerHTML = '<span class="font-bold">' + fullTranscript + '</span>' + '<span class="text-gray-400">' + interimTranscript + '</span>';
+            // Safe DOM rendering — never inject transcript text via innerHTML
+            const finalSpan = document.createElement('span');
+            finalSpan.className = 'font-bold';
+            finalSpan.textContent = fullTranscript;
+            const interimSpan = document.createElement('span');
+            interimSpan.className = 'text-gray-400';
+            interimSpan.textContent = interimTranscript;
+            transcriptContent.replaceChildren(finalSpan, interimSpan);
             scrollToBottom(transcriptContent.parentElement);
         };
 
@@ -160,7 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('Speech recognition error:', event.error);
             if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
                 updateStatus('マイクアクセス拒否', 'error');
-                isRecording = false; // Stop auto-restarting permanently
+                isRecording = false;
                 addAdviceToUI('⚠️ マイクへのアクセスが許可されていません。ブラウザの設定からマイクの権限をオンにし、ページを更新して再試行してください。', 'system');
                 endMeetingUI();
             } else if (event.error === 'network') {
@@ -173,24 +262,29 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         recognition.onend = () => {
-            // Auto-restart if we are supposed to be recording
             if (isRecording) {
-                console.log('Restarting speech recognition...');
+                if (restartCount >= MAX_RESTART_ATTEMPTS) {
+                    addAdviceToUI('⚠️ 音声認識が繰り返し失敗したため停止しました。ページを更新して再試行してください。', 'system');
+                    endMeetingUI();
+                    return;
+                }
+                restartCount++;
                 updateStatus('再接続中...', 'error');
                 clearTimeout(restartTimeout);
                 restartTimeout = setTimeout(() => {
                     try {
                         recognition.start();
-                    } catch(e) {
+                    } catch (e) {
                         console.error("Failed to restart recognition:", e);
-                        // Make sure we update UI if it permanently fails
                     }
-                }, 1000); // 1秒おいてから再起動（無限ループクラッシュ防止）
+                }, 1000);
             } else {
                 updateStatus('待機中', 'normal');
             }
         };
     }
+
+    // --- Event Handlers ---
 
     startBtn.addEventListener('click', () => {
         if (!localStorage.getItem('geminiApiKey')) {
@@ -202,17 +296,18 @@ document.addEventListener('DOMContentLoaded', () => {
         fullTranscript = "";
         aiAdviceContent.innerHTML = "";
         lastAdviceIndex = 0;
-        transcriptContent.innerHTML = "";
-        
+        restartCount = 0;
+        transcriptContent.replaceChildren();
+
         isRecording = true;
         startBtn.classList.add('hidden');
         endBtn.classList.remove('hidden');
         midwaySummaryBtn.classList.remove('hidden');
-        
+
         try {
             recognition.start();
             addAdviceToUI("会議を開始しました。文字起こしが一定量溜まると、自動でアドバイスが表示されます...", "system");
-        } catch(e) {
+        } catch (e) {
             console.error(e);
         }
     });
@@ -228,11 +323,9 @@ document.addEventListener('DOMContentLoaded', () => {
     endBtn.addEventListener('click', async () => {
         endMeetingUI();
         if (recognition) {
-            try {
-                recognition.stop();
-            } catch(e) {}
+            try { recognition.stop(); } catch (e) { /* already stopped */ }
         }
-        
+
         if (fullTranscript.trim().length > 0) {
             await generateSummary(true);
         } else {
@@ -240,157 +333,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    function scrollToBottom(container) {
-        container.scrollTop = container.scrollHeight;
-    }
-
-    function addAdviceToUI(text, type="ai") {
-        const div = document.createElement('div');
-        div.className = `p-4 rounded-xl advice-item ${type === 'system' ? 'bg-gray-100 text-gray-500 text-base' : 'bg-blue-50 border border-blue-200 text-blue-900 shadow-sm'}`;
-        
-        if (type === 'ai') {
-             div.innerHTML = `<div class="font-bold text-sm text-blue-600 mb-2 flex items-center">
-                 <svg class="w-5 h-5 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd" /></svg>
-                 AI Assistant
-             </div>${text.replace(/\n/g, '<br>')}`;
-        } else {
-             div.innerText = text;
-        }
-
-        aiAdviceContent.prepend(div);
-        return div;
-    }
-
-    async function checkAndFetchAdvice() {
-        // すでにAPIを叩いている最中なら重複して送らない
-        if (isFetchingAdvice) return;
-
-        const newText = fullTranscript.substring(lastAdviceIndex);
-        if (newText.length >= ADVICE_THRESHOLD_CHARS) {
-            isFetchingAdvice = true;
-            const contextToSend = fullTranscript;
-            lastAdviceIndex = fullTranscript.length;
-            
-            const loadingIndicator = addAdviceToUI("✨ AIがアドバイスを検討中...", "system");
-            await callGeminiForAdvice(contextToSend, loadingIndicator);
-            
-            isFetchingAdvice = false;
-            // もしAPI通信中にさらに50文字以上溜まっていたら再帰的に処理する
-            checkAndFetchAdvice();
-        }
-    }
-
-    async function callGeminiForAdvice(transcript, loadingIndicator) {
-        const apiKey = localStorage.getItem('geminiApiKey');
-        const prompt = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
-        
-        try {
-            // Using flash lite for maximum speed and free-tier volume
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{
-                        parts: [
-                            { text: prompt + "\n\n【ここまでの会話ログ】\n" + transcript }
-                        ]
-                    }],
-                    generationConfig: {
-                        temperature: 0.7,
-                        maxOutputTokens: 250
-                    }
-                })
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({}));
-                console.error("API Response Error:", errorData);
-                throw new Error(`API通信エラー (${response.status}): APIキー設定等が正しいかご確認ください。`);
-            }
-            
-            const data = await response.json();
-            if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
-                throw new Error("AIから有効な回答が得られませんでした。");
-            }
-            
-            if (loadingIndicator && loadingIndicator.parentNode) {
-                loadingIndicator.parentNode.removeChild(loadingIndicator);
-            }
-
-            const textResponse = data.candidates[0].content.parts[0].text;
-            addAdviceToUI(textResponse);
-        } catch(e) {
-            console.error("Gemini API Error for advice:", e);
-            if (loadingIndicator && loadingIndicator.parentNode) {
-                loadingIndicator.parentNode.removeChild(loadingIndicator);
-            }
-            addAdviceToUI(`⚠️ AIアドバイス取得エラー:\n${e.message}`, "system");
-        }
-    }
-
-    async function generateSummary(isFinal) {
-        let loadingText = loadingOverlay.querySelector('p');
-        if(loadingText) {
-            loadingText.textContent = isFinal ? "議事録を生成・送信しています..." : "途中要約を生成しています...";
-        }
-        loadingOverlay.classList.remove('hidden');
-        loadingOverlay.classList.add('flex');
-        
-        const apiKey = localStorage.getItem('geminiApiKey');
-        const prompt = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
-        const webhookUrl = localStorage.getItem('webhookUrl');
-
-        try {
-            // Using flash lite for cost-effectiveness and high capacity
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{
-                        parts: [
-                            { text: prompt + "\n\n【会議ログ全体】\n" + fullTranscript }
-                        ]
-                    }],
-                    generationConfig: {
-                        temperature: 0.2
-                    }
-                })
-            });
-
-            if (!response.ok) throw new Error(`API Error: ${response.status}`);
-            const data = await response.json();
-            const minutesMarkdown = data.candidates[0].content.parts[0].text;
-
-            // Show minutes modal
-            minutesModalTitle.textContent = isFinal ? "生成された議事録" : "途中要約";
-            minutesOutput.textContent = minutesMarkdown;
-            minutesModal.classList.remove('hidden');
-
-            // Send to Webhook if configured and it is the final meeting summary
-            if (isFinal && webhookUrl) {
-                await fetch(webhookUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: minutesMarkdown })
-                }).catch(err => console.error("Webhook POST Error", err));
-            }
-            
-        } catch(e) {
-            console.error(e);
-            alert("議事録の生成に失敗しました: " + e.message);
-        } finally {
-            loadingOverlay.classList.add('hidden');
-            loadingOverlay.classList.remove('flex');
-        }
-    }
-
-    // Minutes Modal actions
     closeMinutesBtn.addEventListener('click', () => {
         minutesModal.classList.add('hidden');
-        
-        // Reset state only if recording has stopped (i.e. final minutes)
         if (!isRecording) {
-            transcriptContent.innerHTML = "";
+            transcriptContent.replaceChildren();
             aiAdviceContent.innerHTML = "";
             fullTranscript = "";
             lastAdviceIndex = 0;
@@ -400,10 +346,97 @@ document.addEventListener('DOMContentLoaded', () => {
 
     copyMinutesBtn.addEventListener('click', () => {
         navigator.clipboard.writeText(minutesOutput.textContent).then(() => {
-            const originalText = copyMinutesBtn.innerText;
-            copyMinutesBtn.innerText = "コピーしました！";
-            setTimeout(() => { copyMinutesBtn.innerText = originalText; }, 2000);
+            const originalText = copyMinutesBtn.textContent;
+            copyMinutesBtn.textContent = "コピーしました！";
+            setTimeout(() => { copyMinutesBtn.textContent = originalText; }, 2000);
         });
     });
 
+    downloadMinutesBtn.addEventListener('click', () => {
+        const text = minutesOutput.textContent;
+        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `minutes-${new Date().toISOString().slice(0, 10)}.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+    });
+
+    // --- Core Logic ---
+
+    async function checkAndFetchAdvice() {
+        if (isFetchingAdvice) return;
+
+        const newText = fullTranscript.substring(lastAdviceIndex);
+        if (newText.length >= ADVICE_THRESHOLD_CHARS) {
+            isFetchingAdvice = true;
+            const contextToSend = fullTranscript;
+            lastAdviceIndex = fullTranscript.length;
+
+            const loadingIndicator = addAdviceToUI("✨ AIがアドバイスを検討中...", "system");
+            await callGeminiForAdvice(contextToSend, loadingIndicator);
+
+            isFetchingAdvice = false;
+            checkAndFetchAdvice(); // Process any backlog that accumulated during the API call
+        }
+    }
+
+    async function callGeminiForAdvice(transcript, loadingIndicator) {
+        const systemPrompt = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
+        const prompt = `${systemPrompt}\n\n【ここまでの会話ログ】\n${transcript}`;
+
+        try {
+            const text = await callGeminiAPI(prompt, { temperature: 0.7, maxOutputTokens: 250 });
+            if (loadingIndicator?.parentNode) loadingIndicator.remove();
+            addAdviceToUI(text);
+        } catch (e) {
+            console.error("Gemini API Error for advice:", e);
+            if (loadingIndicator?.parentNode) loadingIndicator.remove();
+            addAdviceToUI(`⚠️ AIアドバイス取得エラー:\n${e.message}`, "system");
+        }
+    }
+
+    async function generateSummary(isFinal) {
+        const loadingText = loadingOverlay.querySelector('p');
+        if (loadingText) {
+            loadingText.textContent = isFinal ? "議事録を生成・送信しています..." : "途中要約を生成しています...";
+        }
+        loadingOverlay.classList.remove('hidden');
+        loadingOverlay.classList.add('flex');
+
+        const systemPrompt = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
+        const prompt = `${systemPrompt}\n\n【会議ログ全体】\n${fullTranscript}`;
+        const webhookUrl = localStorage.getItem('webhookUrl');
+
+        try {
+            const minutesMarkdown = await callGeminiAPI(prompt, { temperature: 0.2, maxOutputTokens: 2000 });
+
+            minutesModalTitle.textContent = isFinal ? "生成された議事録" : "途中要約";
+            minutesOutput.textContent = minutesMarkdown;
+            minutesModal.classList.remove('hidden');
+
+            if (isFinal && webhookUrl) {
+                try {
+                    const webhookResponse = await fetch(webhookUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: minutesMarkdown })
+                    });
+                    if (!webhookResponse.ok) {
+                        showToast(`⚠️ Webhook送信失敗 (${webhookResponse.status})`);
+                    }
+                } catch (err) {
+                    console.error("Webhook POST Error", err);
+                    showToast('⚠️ Webhookへの送信に失敗しました。');
+                }
+            }
+        } catch (e) {
+            console.error(e);
+            alert("議事録の生成に失敗しました: " + e.message);
+        } finally {
+            loadingOverlay.classList.add('hidden');
+            loadingOverlay.classList.remove('flex');
+        }
+    }
 });

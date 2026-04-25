@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ai-meeting-v3';
+const CACHE_NAME = 'ai-meeting-v4';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -18,39 +18,31 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cache) => {
-          if (cache !== CACHE_NAME) {
-            return caches.delete(cache);
-          }
-        })
-      );
-    })
+    caches.keys()
+      .then((cacheNames) => Promise.all(
+        cacheNames
+          .filter((name) => name !== CACHE_NAME)
+          .map((name) => caches.delete(name))
+      ))
+      .then(() => self.clients.claim())
   );
-  return self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
-  // We only cache GET requests
   if (event.request.method !== 'GET') return;
-  // Exclude API calls like the Gemini API
+  // Skip external API and CDN requests — they must always go to the network
   if (event.request.url.includes('googleapis.com')) return;
-  
-  // Network-First strategy
+  if (event.request.url.includes('cdn.tailwindcss.com')) return;
+
   event.respondWith(
-    fetch(event.request).then((response) => {
-      // If we got a valid response, clone it and cache it for offline use
-      if(response && response.status === 200 && response.type === 'basic') {
-          let responseClone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseClone);
-          });
-      }
-      return response;
-    }).catch(function() {
-      // Fallback to cache if offline
-      return caches.match(event.request);
-    })
+    fetch(event.request)
+      .then((response) => {
+        if (response && response.status === 200 && response.type === 'basic') {
+          const responseClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
