@@ -1,11 +1,11 @@
 {
-  "name": "AI Meeting Assistant",
-  "short_name": "AI Meeting",
-  "description": "リアルタイムでアシストする議事録作成PWA",
+  "name": "会議の温度",
+  "short_name": "温度",
+  "description": "会議中の応酬の密度と声量の変化だけを見て、手元にだけ知らせる。通信しません。",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#f9fafb",
-  "theme_color": "#3b82f6",
+  "background_color": "#0f172a",
+  "theme_color": "#1e293b",
   "icons": [
     {
       "src": "icon-192.png",

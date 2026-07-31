@@ -2,163 +2,109 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AI Meeting Assistant PWA</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>会議ファシリテーター</title>
     <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="apple-touch-icon" href="icon-192.png">
-    <meta name="theme-color" content="#3b82f6">
+    <meta name="theme-color" content="#1e293b">
 </head>
-<body class="bg-gray-50 text-gray-800 font-sans h-screen flex flex-col antialiased">
-    
-    <!-- Top Header Bar -->
-    <header class="flex justify-between items-center p-4 bg-white shadow-sm shrink-0">
-        <div class="flex items-center">
-            <h1 class="text-xl font-bold text-gray-700">AIアシスタント</h1>
-            <span id="recordingStatusIndicator" class="ml-3 text-xs font-bold px-3 py-1 bg-gray-200 text-gray-600 rounded-full transition-colors hidden">待機中</span>
-            <span id="savedIndicator" class="ml-3 text-xs text-gray-400 hidden"></span>
-        </div>
-        <button id="settingsBtn" class="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition" aria-label="設定">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-        </button>
-    </header>
+<body>
 
-    <!-- Main Container -->
-    <main class="flex-1 flex flex-col overflow-hidden relative">
+<header>
+    <h1>会議ファシリテーター</h1>
+    <span id="totalClock" class="total"></span>
+</header>
 
-        <!-- Restore banner -->
-        <div id="restoreBanner" class="hidden mx-4 mt-4 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-4 shrink-0">
-            <span id="restoreLabel" class="text-sm text-amber-900"></span>
-            <div class="shrink-0 space-x-2">
-                <button id="restoreBtn" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-bold py-2 px-4 rounded-lg transition">復元する</button>
-                <button id="discardBtn" class="text-amber-700 hover:bg-amber-100 text-sm py-2 px-3 rounded-lg transition">破棄</button>
-            </div>
-        </div>
+<main>
 
-        <!-- Controls -->
-        <div class="px-4 py-6 shrink-0 flex justify-center flex-wrap gap-3">
-            <button id="startBtn" class="flex-1 max-w-xs bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-2xl shadow-lg transition transform active:scale-95 text-xl flex justify-center items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </svg>
-                会議スタート
-            </button>
-            <button id="markBtn" class="flex-1 max-w-xs bg-purple-600 hover:bg-purple-700 text-white font-bold py-4 px-2 rounded-2xl shadow-lg transition transform active:scale-95 text-lg hidden flex justify-center items-center" title="気になった瞬間に押す">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9" />
-                </svg>
-                <span>ここをマーク</span>
-            </button>
-            <button id="midwaySummaryBtn" class="flex-1 max-w-xs bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-2 rounded-2xl shadow-lg transition transform active:scale-95 text-lg hidden flex justify-center items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                </svg>
-                途中要約
-            </button>
-            <button id="endBtn" class="flex-1 max-w-xs bg-red-500 hover:bg-red-600 text-white font-bold py-4 px-2 rounded-2xl shadow-lg transition transform active:scale-95 text-lg hidden flex justify-center items-center">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
-                </svg>
-                会議終了
-            </button>
-        </div>
-
-        <!-- AI Advice Area -->
-        <div class="flex-1 px-4 overflow-y-auto mb-4" id="aiAdviceContainer">
-            <div class="h-full bg-white rounded-2xl shadow-sm border border-blue-100 p-6 flex flex-col">
-                <h2 class="text-blue-800 font-bold mb-4 flex items-center text-lg">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                    リアルタイムAIアドバイス
-                </h2>
-                <div id="aiAdviceContent" class="flex-1 overflow-y-auto space-y-4 text-2xl font-medium text-gray-800 leading-relaxed">
-                    <div class="text-gray-400 text-base text-center mt-10">開始ボタンを押すと、ここにアドバイスが表示されます。</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Transcription Log -->
-        <div class="h-1/3 shrink-0 px-4 pb-4">
-            <div class="h-full bg-gray-100 rounded-2xl p-4 overflow-y-auto border border-gray-200">
-                <div class="flex justify-between items-center mb-2 sticky top-0 bg-gray-100 py-1">
-                    <h3 class="text-sm font-semibold text-gray-500">文字起こしログ</h3>
-                    <button id="downloadTranscriptBtn" class="text-xs text-gray-500 hover:text-gray-800 border border-gray-300 rounded-md px-2 py-1 transition disabled:opacity-40" disabled>文字起こしを保存</button>
-                </div>
-                <div id="transcriptContent" class="text-base text-gray-700 whitespace-pre-wrap"></div>
-            </div>
-        </div>
-    </main>
-
-    <!-- Settings Modal -->
-    <div id="settingsModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden flex justify-center items-center p-4">
-        <div class="bg-white rounded-2xl w-full max-w-lg max-h-full overflow-y-auto p-6 shadow-2xl">
-            <div class="flex justify-between items-center mb-6">
-                <h2 class="text-2xl font-bold text-gray-800">設定</h2>
-                <button id="closeSettingsBtn" class="text-gray-500 hover:text-gray-800">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                </button>
-            </div>
-            
-            <form id="settingsForm" class="space-y-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Gemini APIキー *</label>
-                    <input type="password" id="apiKeyInput" required class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
-                    <p id="modelIndicator" class="mt-2 text-xs text-gray-500">モデルは接続時に自動で選ばれます</p>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Webhook URL (任意)</label>
-                    <input type="url" id="webhookUrlInput" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" placeholder="https://...">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">リアルタイム用プロンプト</label>
-                    <textarea id="realtimePromptInput" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"></textarea>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">議事録用プロンプト</label>
-                    <textarea id="minutesPromptInput" rows="4" class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"></textarea>
-                </div>
-                
-                <div class="pt-4">
-                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-xl shadow transition">保存して閉じる</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    
-    <!-- Loading Overlay for Minutes -->
-    <div id="loadingOverlay" class="fixed inset-0 bg-blue-900 bg-opacity-80 z-50 hidden flex-col justify-center items-center text-white">
-        <svg class="animate-spin -ml-1 mr-3 h-12 w-12 text-white mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-        </svg>
-        <p class="text-xl font-bold">議事録を生成・送信しています...</p>
+    <div id="restoreBanner" class="restore" hidden>
+        <span id="restoreLabel"></span>
+        <span class="restore-actions">
+            <button id="restoreBtn" class="btn small">続きから</button>
+            <button id="discardBtn" class="btn small ghost">破棄</button>
+        </span>
     </div>
 
-    <!-- Generated Minutes Modal -->
-    <div id="minutesModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 hidden flex justify-center items-center p-4">
-        <div class="bg-white rounded-2xl w-full max-w-4xl max-h-full flex flex-col p-6 shadow-2xl">
-            <div class="flex justify-between items-center mb-4 shrink-0">
-                <h2 id="minutesModalTitle" class="text-2xl font-bold text-gray-800">生成された議事録</h2>
-                <button id="closeMinutesBtn" class="text-gray-500 hover:text-gray-800">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                </button>
-            </div>
-            <div class="flex-1 overflow-y-auto mb-4 border rounded bg-gray-50 p-4">
-                <pre id="minutesOutput" class="whitespace-pre-wrap text-sm text-gray-800 font-sans"></pre>
-            </div>
-            <div class="shrink-0 flex justify-end space-x-3">
-                <button id="copyMinutesBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg transition">クリップボードにコピー</button>
-                <button id="downloadMinutesBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition disabled:opacity-40" disabled>.md で保存</button>
-            </div>
-        </div>
-    </div>
+    <!-- 1. 会議前 ------------------------------------------------------ -->
+    <section id="setup">
+        <h2>今日決めること</h2>
+        <p class="hint">
+            1行に1つ。行末に数字を書くと配分（分）になります。省略時は10分。<br>
+            <strong>冒頭でこれを読み上げて、相手と合意してから始めてください。</strong>
+        </p>
+        <textarea id="agendaInput" rows="6" spellcheck="false"
+                  placeholder="来期の設備投資をやるか決める 20&#10;人の採用、今期中に動くか 15&#10;決算の締め方の確認 10"></textarea>
 
-    <script src="app.js"></script>
+        <label class="check">
+            <input type="checkbox" id="useHeat" checked>
+            <span>
+                声の調子も見る（マイクを使います）
+                <small>音量と発話の間隔だけを測ります。通信しません。録音もしません。</small>
+            </span>
+        </label>
+
+        <div id="setupError" class="error" hidden></div>
+        <button id="startBtn" class="btn primary big">会議を始める</button>
+
+        <p class="note">
+            録音・文字起こし・議事録は別サービス（Granola / Notta / Otter など）に任せる前提です。
+            このページは<strong>議題の時間管理</strong>と<strong>温度</strong>だけを見ます。
+        </p>
+    </section>
+
+    <!-- 2. 会議中 ------------------------------------------------------ -->
+    <section id="running" hidden>
+        <div class="panel">
+            <div class="topic-head">
+                <span id="topicIndex" class="topic-index"></span>
+                <span id="topicTitle" class="topic-title"></span>
+            </div>
+            <div id="topicClock" class="clock">00:00</div>
+            <div class="bar"><div id="topicBar" class="bar-fill"></div></div>
+        </div>
+
+        <!-- 促し。相手には見せない。読むのも言うのも自分 -->
+        <section id="notice" class="notice" hidden>
+            <div id="noticeTitle" class="notice-title"></div>
+            <div id="noticeLine" class="notice-line"></div>
+            <button id="dismissBtn" class="dismiss">閉じる</button>
+        </section>
+
+        <div id="heatPanel" class="heat" hidden>
+            <div id="heatState" class="heat-state calm">平常値を測定中</div>
+            <div class="meter"><div id="meterFill" class="meter-fill"></div></div>
+            <div id="heatStats" class="heat-stats">—</div>
+        </div>
+
+        <div class="controls">
+            <button id="agreedBtn" class="btn primary">決まった → 次へ</button>
+            <button id="deferBtn" class="btn warn">持ち越し → 次へ</button>
+        </div>
+        <div class="controls">
+            <button id="markBtn" class="btn mark">ここをマーク</button>
+            <button id="endBtn" class="btn stop">会議を終了</button>
+        </div>
+    </section>
+
+    <!-- 3. 会議後 ------------------------------------------------------ -->
+    <section id="done" hidden>
+        <h2>結果</h2>
+        <ul id="doneTopics" class="results"></ul>
+        <p class="hint">
+            持ち越しになった論点が、次回の議題です。<strong>却下した案は、理由も一緒に残してください。</strong>
+            理由が残っていない案は、何度でも戻ってきます。
+        </p>
+        <div class="controls">
+            <button id="copyBtn" class="btn ghost">コピー</button>
+            <button id="exportBtn" class="btn primary">.md で保存</button>
+        </div>
+        <button id="newBtn" class="btn ghost">新しい会議を始める</button>
+    </section>
+
+</main>
+
+<script src="heat.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

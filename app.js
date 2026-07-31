@@ -1,669 +1,369 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // --- Constants & Defaults ---
-    const DEFAULT_REALTIME_PROMPT = `あなたは会議の観察者です。直近の会話を読み、次のどちらかだけを返してください。
+/*
+ * 議題タイマー式ファシリテーター。
+ *
+ * Microsoft Teams の Facilitator Agent を参考にした。あちらの中核である
+ *   「招待から議題を取り出す / 議題ごとに時間配分とタイマーを出す /
+ *     中間と終盤で促す / 1つの論点に時間をかけすぎたら指摘する」
+ * は、そのほとんどが AI を必要としない。議題リストとタイマーだけで動く。
+ *
+ * この方式を採る理由:
+ *   - 料金がかからない（API を一切呼ばない）
+ *   - 話者分離が要らない（誰が話しているか知る必要がない）
+ *   - 誤検知しない（時間は事実であり、推論ではない）
+ *
+ * 「1つの論点に時間をかけすぎ」は、話の逸脱の代理指標になる。
+ * LLM に「今ズレていますか」と尋ねなくても、時間で測れる。
+ *
+ * Teams との違いは1点だけ。あちらは全員に見せるが、これは手元だけに出す。
+ * AI に議事進行される感覚が反発を生むため、軌道修正は必ず本人が発話する。
+ */
+(() => {
+    'use strict';
 
-1) 議論が感情的になりかけている、または同じ主張が繰り返されて前に進んでいない場合
-   → その状況を30字以内で1行だけ指摘する
-2) それ以外の場合
-   → 「―」の1文字だけを返す
+    const STORE = 'facilitator.v1';
+    const DEFAULT_MINUTES = 10;
+    const MIDPOINT = 0.5;
+    const WRAPUP = 0.8;
+    const OVERRUN_REPEAT_MS = 180000;   // 超過後の再通知間隔
 
-説明・前置き・提案・要約は不要です。必ず1行のみ。`;
+    let meeting = null;
+    let ticker = null;
+    let heatOn = false;
 
-    const DEFAULT_MINUTES_PROMPT = "以下の会議ログを、決まったこと / 決まらなかったこと / 次のアクション（担当と期限） の3見出しでMarkdownにまとめてください。憶測で補わず、ログにない内容は書かないでください。前置きは不要です。";
-
-    const ADVICE_THRESHOLD_CHARS = 200;   // これだけ新規文字が溜まったら判定を検討する
-    const ADVICE_COOLDOWN_MS = 45000;     // 429対策: API呼び出しの下限間隔
-    const MAX_CONTEXT_CHARS = 3000;       // 毎回全文を送らない（会議が長引くほど膨らむのを防ぐ）
-    const STORAGE_KEY = 'meetingSession.v1';
-    const MODEL_CACHE_KEY = 'geminiModel.v1';
-    const MODEL_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-    const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-    const SAVE_DEBOUNCE_MS = 800;
-    const WATCHDOG_INTERVAL_MS = 3000;    // 認識エンジンの死活監視
-
-    // --- State ---
-    let isRecording = false;      // ユーザーの意図（記録したいか）
-    let engineRunning = false;    // 実際の認識エンジンの状態
-    let recognition = null;
-    let fullTranscript = "";
-    let segments = [];            // { t: epochMs, text }
-    let markers = [];             // { t: epochMs, kind }
-    let sessionStartedAt = null;
-    let lastAdviceIndex = 0;
-    let lastAdviceAt = 0;
-    let isFetchingAdvice = false;
-    let restartTimeout = null;
-    let restartAttempts = 0;
-    let watchdogTimer = null;
-    let saveTimer = null;
-    let finalEl = null;
-    let interimEl = null;
-
-    // --- DOM Elements ---
-    const startBtn = document.getElementById('startBtn');
-    const endBtn = document.getElementById('endBtn');
-    const midwaySummaryBtn = document.getElementById('midwaySummaryBtn');
-    const markBtn = document.getElementById('markBtn');
-    const recordingStatusIndicator = document.getElementById('recordingStatusIndicator');
-    const savedIndicator = document.getElementById('savedIndicator');
-    const settingsBtn = document.getElementById('settingsBtn');
-    const settingsModal = document.getElementById('settingsModal');
-    const closeSettingsBtn = document.getElementById('closeSettingsBtn');
-    const settingsForm = document.getElementById('settingsForm');
-
-    const restoreBanner = document.getElementById('restoreBanner');
-    const restoreLabel = document.getElementById('restoreLabel');
-    const restoreBtn = document.getElementById('restoreBtn');
-    const discardBtn = document.getElementById('discardBtn');
-
-    // Settings inputs
-    const apiKeyInput = document.getElementById('apiKeyInput');
-    const webhookUrlInput = document.getElementById('webhookUrlInput');
-    const realtimePromptInput = document.getElementById('realtimePromptInput');
-    const minutesPromptInput = document.getElementById('minutesPromptInput');
-
-    const transcriptContent = document.getElementById('transcriptContent');
-    const aiAdviceContent = document.getElementById('aiAdviceContent');
-
-    const loadingOverlay = document.getElementById('loadingOverlay');
-    const minutesModal = document.getElementById('minutesModal');
-    const minutesModalTitle = document.getElementById('minutesModalTitle');
-    const closeMinutesBtn = document.getElementById('closeMinutesBtn');
-    const minutesOutput = document.getElementById('minutesOutput');
-    const copyMinutesBtn = document.getElementById('copyMinutesBtn');
-    const downloadMinutesBtn = document.getElementById('downloadMinutesBtn');
-    const downloadTranscriptBtn = document.getElementById('downloadTranscriptBtn');
-
-    // --- Initialization ---
-    initSettings();
-    initTranscriptView();
-    initSpeechRecognition();
-    initPWA();
-    offerRestore();
+    const $ = (id) => document.getElementById(id);
+    const views = { setup: $('setup'), running: $('running'), done: $('done') };
 
     // ------------------------------------------------------------------
-    // Status / UI
-    // ------------------------------------------------------------------
-    function setStatus(text, type = 'idle') {
-        if (!recordingStatusIndicator) return;
-        recordingStatusIndicator.className =
-            'ml-3 text-xs font-bold px-3 py-1 rounded-full transition-colors';
-        const styles = {
-            idle: 'bg-gray-200 text-gray-600',
-            recording: 'bg-red-100 text-red-700',
-            warn: 'bg-yellow-100 text-yellow-700',
-            error: 'bg-red-600 text-white'
-        };
-        recordingStatusIndicator.classList.add(...styles[type].split(' '));
-        recordingStatusIndicator.textContent = text;
-        if (type === 'idle' && (text === '待機中' || text === '')) {
-            recordingStatusIndicator.classList.add('hidden');
-        }
-    }
-
-    function setSaved(text) {
-        if (!savedIndicator) return;
-        savedIndicator.textContent = text;
-        savedIndicator.classList.toggle('hidden', !text);
-    }
-
-    // ------------------------------------------------------------------
-    // Persistence（落ちても失わない）
-    // ------------------------------------------------------------------
-    function scheduleSave() {
-        clearTimeout(saveTimer);
-        saveTimer = setTimeout(saveSession, SAVE_DEBOUNCE_MS);
-    }
-
-    function saveSession() {
-        clearTimeout(saveTimer);
-        if (!segments.length && !markers.length) return;
-        try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify({
-                startedAt: sessionStartedAt,
-                updatedAt: Date.now(),
-                segments,
-                markers
-            }));
-            setSaved('自動保存 ' + new Date().toLocaleTimeString('ja-JP', {
-                hour: '2-digit', minute: '2-digit'
-            }));
-        } catch (e) {
-            // 容量超過など。記録は続行させ、書き出しを促す
-            console.error('Save failed:', e);
-            setSaved('⚠️ 自動保存できません');
-        }
-    }
-
-    function loadSession() {
-        try {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (!raw) return null;
-            const data = JSON.parse(raw);
-            if (!data || !Array.isArray(data.segments) || !data.segments.length) return null;
-            return data;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function clearSession() {
-        clearTimeout(saveTimer);
-        localStorage.removeItem(STORAGE_KEY);
-        setSaved('');
-    }
-
-    function offerRestore() {
-        const data = loadSession();
-        if (!data || !restoreBanner) return;
-        const when = new Date(data.updatedAt).toLocaleString('ja-JP', {
-            month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'
-        });
-        const chars = data.segments.reduce((n, s) => n + s.text.length, 0);
-        restoreLabel.textContent = `${when} の記録が残っています（約${chars}文字）`;
-        restoreBanner.classList.remove('hidden');
-
-        restoreBtn.addEventListener('click', () => {
-            segments = data.segments;
-            markers = Array.isArray(data.markers) ? data.markers : [];
-            sessionStartedAt = data.startedAt || (segments[0] && segments[0].t) || Date.now();
-            fullTranscript = segments.map(s => s.text).join(' ') + ' ';
-            lastAdviceIndex = fullTranscript.length;
-            renderTranscriptFromScratch();
-            restoreBanner.classList.add('hidden');
-            midwaySummaryBtn.classList.remove('hidden');
-            downloadTranscriptBtn.disabled = false;
-            setSaved('復元しました');
-        });
-
-        discardBtn.addEventListener('click', () => {
-            clearSession();
-            restoreBanner.classList.add('hidden');
-        });
-    }
-
-    // ------------------------------------------------------------------
-    // Transcript view（毎回作り直さない・勝手にスクロールしない）
-    // ------------------------------------------------------------------
-    function initTranscriptView() {
-        transcriptContent.textContent = '';
-        finalEl = document.createElement('span');
-        finalEl.className = 'font-medium text-gray-700';
-        interimEl = document.createElement('span');
-        interimEl.className = 'text-gray-400';
-        transcriptContent.appendChild(finalEl);
-        transcriptContent.appendChild(interimEl);
-    }
-
-    function renderTranscriptFromScratch() {
-        initTranscriptView();
-        finalEl.textContent = segments.map(s => s.text).join(' ') + ' ';
-        scrollTranscriptIfAtBottom(true);
-    }
-
-    function appendFinal(text) {
-        // textNode追加なのでO(1)。innerHTMLの全再構築をやめる（重くなる原因）
-        finalEl.appendChild(document.createTextNode(text + ' '));
-    }
-
-    function scrollTranscriptIfAtBottom(force) {
-        const box = transcriptContent.parentElement;
-        if (!box) return;
-        const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-        if (force || atBottom) box.scrollTop = box.scrollHeight;
-    }
-
-    // ------------------------------------------------------------------
-    // Speech recognition（止まったら必ず戻る）
-    // ------------------------------------------------------------------
-    function initSpeechRecognition() {
-        window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!window.SpeechRecognition) {
-            setStatus('音声認識に非対応', 'error');
-            addAdvice('このブラウザは音声認識に対応していません。PCのChromeまたはEdgeで開いてください。', 'system');
-            startBtn.disabled = true;
-            startBtn.classList.add('opacity-50', 'cursor-not-allowed');
-            return;
-        }
-
-        recognition = new window.SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'ja-JP';
-
-        recognition.onstart = () => {
-            engineRunning = true;
-            restartAttempts = 0;
-            setStatus('🔴 記録中', 'recording');
-        };
-
-        recognition.onresult = (event) => {
-            let interim = '';
-            for (let i = event.resultIndex; i < event.results.length; ++i) {
-                const text = event.results[i][0].transcript;
-                if (event.results[i].isFinal) {
-                    const clean = text.trim();
-                    if (!clean) continue;
-                    segments.push({ t: Date.now(), text: clean });
-                    fullTranscript += clean + ' ';
-                    appendFinal(clean);
-                    scheduleSave();
-                    maybeFetchAdvice();
-                } else {
-                    interim += text;
-                }
-            }
-            interimEl.textContent = interim;
-            scrollTranscriptIfAtBottom(false);
-        };
-
-        recognition.onerror = (event) => {
-            switch (event.error) {
-                case 'no-speech':
-                case 'aborted':
-                    // 沈黙や stop() による正常終了。UIは触らない（チカチカの原因だった）
-                    break;
-                case 'not-allowed':
-                case 'service-not-allowed':
-                    isRecording = false;
-                    setStatus('マイク不可', 'error');
-                    addAdvice('マイクへのアクセスが許可されていません。ブラウザのアドレスバー左のアイコンからマイクを許可し、再読み込みしてください。', 'system');
-                    stopRecording();
-                    break;
-                case 'audio-capture':
-                    isRecording = false;
-                    setStatus('マイクなし', 'error');
-                    addAdvice('マイクが見つかりません。接続と入力デバイスの設定を確認してください。', 'system');
-                    stopRecording();
-                    break;
-                default:
-                    console.warn('Speech recognition error:', event.error);
-            }
-        };
-
-        recognition.onend = () => {
-            engineRunning = false;
-            if (isRecording) {
-                // 沈黙のたびに終了するのは正常。即座に戻す（発話の頭切れを防ぐ）
-                scheduleRestart(0);
-            } else {
-                setStatus('待機中', 'idle');
-            }
-        };
-    }
-
-    function scheduleRestart(delay) {
-        clearTimeout(restartTimeout);
-        restartTimeout = setTimeout(() => {
-            if (!isRecording || engineRunning) return;
-            try {
-                recognition.start();
-            } catch (e) {
-                // InvalidStateError 等。握り潰すと二度と復帰しなかったので必ず再試行する
-                restartAttempts++;
-                if (restartAttempts >= 2) setStatus('再接続中…', 'warn');
-                scheduleRestart(Math.min(500 * restartAttempts, 4000));
-            }
-        }, delay);
-    }
-
-    function startWatchdog() {
-        clearInterval(watchdogTimer);
-        watchdogTimer = setInterval(() => {
-            // onend が来ない / start が黙って失敗した場合の最後の砦
-            if (isRecording && !engineRunning) scheduleRestart(0);
-        }, WATCHDOG_INTERVAL_MS);
-    }
-
-    function stopRecording() {
-        isRecording = false;
-        clearInterval(watchdogTimer);
-        clearTimeout(restartTimeout);
-        if (recognition) {
-            try { recognition.stop(); } catch (e) { /* 未起動なら無視 */ }
-        }
-        endBtn.classList.add('hidden');
-        midwaySummaryBtn.classList.remove('hidden');
-        markBtn.classList.add('hidden');
-        startBtn.classList.remove('hidden');
-        setStatus('待機中', 'idle');
-        saveSession();
-    }
-
-    // ------------------------------------------------------------------
-    // Controls
-    // ------------------------------------------------------------------
-    startBtn.addEventListener('click', () => {
-        if (!localStorage.getItem('geminiApiKey')) {
-            settingsModal.classList.remove('hidden');
-            return;
-        }
-        if (segments.length && !confirm('現在の記録を破棄して新しい会議を始めますか？')) return;
-
-        clearSession();
-        fullTranscript = "";
-        segments = [];
-        markers = [];
-        sessionStartedAt = Date.now();
-        lastAdviceIndex = 0;
-        lastAdviceAt = 0;
-        aiAdviceContent.innerHTML = "";
-        initTranscriptView();
-        if (restoreBanner) restoreBanner.classList.add('hidden');
-        downloadTranscriptBtn.disabled = false;
-
-        isRecording = true;
-        startBtn.classList.add('hidden');
-        endBtn.classList.remove('hidden');
-        midwaySummaryBtn.classList.remove('hidden');
-        markBtn.classList.remove('hidden');
-
-        setStatus('起動中…', 'warn');
-        startWatchdog();
-        scheduleRestart(0);
-    });
-
-    markBtn.addEventListener('click', () => {
-        markers.push({ t: Date.now(), kind: 'mark' });
-        saveSession();
-        const label = markBtn.querySelector('span');
-        if (label) {
-            const original = label.textContent;
-            label.textContent = '記録しました';
-            setTimeout(() => { label.textContent = original; }, 1200);
-        }
-    });
-
-    midwaySummaryBtn.addEventListener('click', () => {
-        if (!fullTranscript.trim()) return alert('文字起こしがまだありません。');
-        generateSummary(false);
-    });
-
-    endBtn.addEventListener('click', () => {
-        stopRecording();
-        if (fullTranscript.trim()) generateSummary(true);
-    });
-
-    // ------------------------------------------------------------------
-    // Gemini モデルの自動解決
+    // 議題の入力
     //
-    // モデル名をハードコードすると、Google が世代交代させるたびに 404 になり
-    // 追いかけ続けることになる（このリポジトリのコミット履歴がその記録）。
-    // 起動時に一覧を取得し、使えるものから自動で選ぶ。
+    // 会議は不定期で、開始前の手間は限りなく小さくないと使われない。
+    // 1行1議題、末尾の数字があれば配分（分）として読む。
     // ------------------------------------------------------------------
-    function scoreModel(name) {
-        const n = name.replace(/^models\//, '');
-        if (!/^gemini-/.test(n)) return -1;
-        // 生成以外の用途（埋め込み・画像・音声合成・Live 等）は除外
-        if (/(embedding|aqa|imagen|image|tts|veo|live|native-audio|computer-use)/.test(n)) return -1;
-
-        const ver = parseFloat((n.match(/^gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0');
-        let tier;
-        if (/flash-lite/.test(n)) tier = 3;        // 最安。無料枠があり、会議中の短い判定には十分
-        else if (/flash/.test(n)) tier = 2;
-        else if (/pro/.test(n)) tier = 1;          // 高価。他が無い時だけ
-        else return -1;
-
-        // この用途では「安定 > 安い > 新しい」。最新の preview に飛びつかない
-        const stable = /(preview|exp|-\d{3,})/.test(n) ? 0 : 1;
-        return stable * 1000 + tier * 100 + ver;
+    function parseAgenda(text) {
+        return text.split('\n')
+            .map(l => l.trim())
+            .filter(Boolean)
+            .map(line => {
+                const m = line.match(/^(.*?)[\s　]+(\d+)$/);
+                return m
+                    ? { title: m[1].trim(), minutes: Math.max(1, parseInt(m[2], 10)) }
+                    : { title: line, minutes: DEFAULT_MINUTES };
+            });
     }
 
-    async function resolveModel(apiKey, force) {
-        if (!force) {
+    function show(name) {
+        Object.entries(views).forEach(([k, el]) => { el.hidden = k !== name; });
+    }
+
+    function fmtClock(ms) {
+        const neg = ms < 0;
+        const s = Math.floor(Math.abs(ms) / 1000);
+        return (neg ? '-' : '') +
+            String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    // ------------------------------------------------------------------
+    // 会議の進行
+    // ------------------------------------------------------------------
+    async function startMeeting() {
+        const topics = parseAgenda($('agendaInput').value);
+        if (!topics.length) {
+            $('setupError').textContent = '議題を1行以上入力してください。';
+            $('setupError').hidden = false;
+            return;
+        }
+
+        meeting = {
+            startedAt: Date.now(),
+            endedAt: null,
+            current: 0,
+            topics: topics.map(t => Object.assign({
+                startedAt: null, endedAt: null, outcome: null, nudged: {}
+            }, t)),
+            markers: [],
+            notices: []
+        };
+        meeting.topics[0].startedAt = Date.now();
+
+        // 音響の監視は任意。拒否されても議題タイマーは動く
+        if ($('useHeat').checked) {
             try {
-                const cached = JSON.parse(localStorage.getItem(MODEL_CACHE_KEY) || 'null');
-                if (cached && Date.now() - cached.at < MODEL_CACHE_TTL_MS) return cached.model;
-            } catch (e) { /* 壊れていたら取り直す */ }
+                await window.HeatMonitor.start({
+                    onFrame: (pct) => { $('meterFill').style.width = pct.toFixed(0) + '%'; },
+                    onState: (level, text, stats) => {
+                        $('heatState').textContent = text;
+                        $('heatState').className = 'heat-state ' + level;
+                        $('heatStats').textContent = stats;
+                    },
+                    onAlert: (title, line) => notice('heat', title, line)
+                });
+                heatOn = true;
+            } catch (e) {
+                $('heatState').textContent = 'マイク不可（' + e.name + '）';
+                $('heatStats').textContent = '議題タイマーは動きます';
+            }
         }
+        $('heatPanel').hidden = !heatOn;
 
-        const res = await fetch(API_BASE + '/models?key=' + encodeURIComponent(apiKey) + '&pageSize=200');
-        if (!res.ok) throw new Error('モデル一覧の取得に失敗 (' + res.status + ')');
-        const data = await res.json();
-
-        const best = (data.models || [])
-            .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
-            .map(m => ({ name: m.name, score: scoreModel(m.name) }))
-            .filter(m => m.score > 0)
-            .sort((a, b) => b.score - a.score)[0];
-
-        if (!best) throw new Error('利用できるモデルが見つかりません');
-        const model = best.name.replace(/^models\//, '');
-        localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({ model, at: Date.now() }));
-        showModelInSettings(model);
-        return model;
+        show('running');
+        save();
+        ticker = setInterval(tick, 1000);
+        tick();
     }
 
-    function showModelInSettings(model) {
-        const el = document.getElementById('modelIndicator');
-        if (el) el.textContent = '使用中のモデル: ' + model;
+    function currentTopic() {
+        return meeting.topics[meeting.current] || null;
     }
 
-    async function callGemini(body) {
-        const apiKey = localStorage.getItem('geminiApiKey');
-        const post = (model) => fetch(
-            API_BASE + '/models/' + model + ':generateContent?key=' + encodeURIComponent(apiKey),
-            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-        );
+    function tick() {
+        const t = currentTopic();
+        const now = Date.now();
+        if (!t) return;
 
-        let res = await post(await resolveModel(apiKey));
-        if (res.status === 404) {
-            // 選んだモデルが廃止された。一覧を取り直して一度だけやり直す
-            res = await post(await resolveModel(apiKey, true));
+        const budget = t.minutes * 60000;
+        const spent = now - t.startedAt;
+        const left = budget - spent;
+        const ratio = spent / budget;
+
+        $('topicTitle').textContent = t.title;
+        $('topicIndex').textContent = (meeting.current + 1) + ' / ' + meeting.topics.length;
+        $('topicClock').textContent = fmtClock(left);
+        $('topicClock').className = 'clock' + (left < 0 ? ' over' : (ratio >= WRAPUP ? ' warn' : ''));
+        $('topicBar').style.width = Math.min(100, ratio * 100).toFixed(1) + '%';
+        $('topicBar').className = 'bar-fill' + (left < 0 ? ' over' : (ratio >= WRAPUP ? ' warn' : ''));
+        $('totalClock').textContent = '全体 ' + fmtClock(now - meeting.startedAt);
+
+        // 時間による促し。推論ではないので誤検知しない
+        if (!t.nudged.mid && ratio >= MIDPOINT && ratio < WRAPUP) {
+            t.nudged.mid = true;
+            notice('time', '半分経過', '「' + t.title + '」— ここまでで何が決まった？');
+        } else if (!t.nudged.wrap && ratio >= WRAPUP && left > 0) {
+            t.nudged.wrap = true;
+            notice('time', '残り ' + Math.ceil(left / 60000) + '分',
+                '結論を出すか、持ち越すかを決めよう');
+        } else if (left <= 0) {
+            const lastOver = t.nudged.overAt || 0;
+            if (now - lastOver > OVERRUN_REPEAT_MS) {
+                t.nudged.overAt = now;
+                const overMin = Math.floor(-left / 60000);
+                notice('time', '予定を' + (overMin > 0 ? overMin + '分' : '') + '超過',
+                    overMin >= 5
+                        ? 'この論点はいったん持ち越そう'
+                        : '延長するか、次に移るかを決めよう');
+            }
         }
-        return res;
-    }
-
-    function extractText(data) {
-        return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
     }
 
     // ------------------------------------------------------------------
-    // AI advice（積み上げない・全文を送らない・連射しない）
+    // 促しの表示
+    //
+    // 相手には見せない。読むのは自分だけで、口に出すのも自分。
+    // 積み上げず、常に最新の1件だけを出す。
     // ------------------------------------------------------------------
-    function addAdvice(text, type = 'ai') {
-        // 直前までの表示を小さくして、最新の1件だけを大きく残す
-        Array.from(aiAdviceContent.children).forEach((el) => {
-            el.classList.remove('text-2xl');
-            el.classList.add('text-sm', 'opacity-50');
+    function notice(kind, title, line) {
+        meeting.notices.push({ t: Date.now(), kind, title, line });
+        $('noticeTitle').textContent = title;
+        $('noticeLine').textContent = line;
+        $('notice').className = 'notice ' + kind;
+        $('notice').hidden = false;
+        save();
+    }
+
+    $('dismissBtn').addEventListener('click', () => { $('notice').hidden = true; });
+
+    // ------------------------------------------------------------------
+    // 議題の決着
+    // ------------------------------------------------------------------
+    function closeTopic(outcome) {
+        const t = currentTopic();
+        if (!t) return;
+        t.outcome = outcome;
+        t.endedAt = Date.now();
+        $('notice').hidden = true;
+
+        if (meeting.current + 1 < meeting.topics.length) {
+            meeting.current++;
+            meeting.topics[meeting.current].startedAt = Date.now();
+            save();
+            tick();
+        } else {
+            endMeeting();
+        }
+    }
+
+    $('agreedBtn').addEventListener('click', () => closeTopic('決まった'));
+    $('deferBtn').addEventListener('click', () => closeTopic('持ち越し'));
+
+    $('markBtn').addEventListener('click', () => {
+        meeting.markers.push({ t: Date.now(), topic: meeting.current });
+        save();
+        const b = $('markBtn');
+        b.textContent = '記録しました';
+        setTimeout(() => { b.textContent = 'ここをマーク'; }, 1200);
+    });
+
+    $('endBtn').addEventListener('click', () => {
+        if (confirm('会議を終了しますか？')) endMeeting();
+    });
+
+    function endMeeting() {
+        clearInterval(ticker);
+        if (heatOn) window.HeatMonitor.stop();
+        meeting.endedAt = Date.now();
+        const t = currentTopic();
+        if (t && !t.endedAt) { t.endedAt = Date.now(); t.outcome = t.outcome || '未決'; }
+        save();
+        renderDone();
+        show('done');
+    }
+
+    // ------------------------------------------------------------------
+    // 事後
+    //
+    // 文字起こしと議事録は既存サービス(Granola / Notta / Otter 等)に任せる前提。
+    // ここが出すのは「どの議題に何分かけ、何が決まらなかったか」と、
+    // 壁時計の時刻つきの出来事だけ。向こうの文字起こしと突き合わせて使う。
+    // ------------------------------------------------------------------
+    function buildReport() {
+        const heat = heatOn ? window.HeatMonitor.snapshot() : { events: [], turnCount: 0 };
+        const lines = [];
+        const d = new Date(meeting.startedAt);
+
+        lines.push('会議記録  ' + d.toLocaleString('ja-JP'));
+        lines.push('所要 ' + Math.round((meeting.endedAt - meeting.startedAt) / 60000) + '分');
+        lines.push('');
+        lines.push('## 議題');
+        meeting.topics.forEach((t, i) => {
+            const spent = t.endedAt && t.startedAt ? Math.round((t.endedAt - t.startedAt) / 60000) : 0;
+            lines.push('- [' + (t.outcome || '未着手') + '] ' + t.title +
+                '（予定' + t.minutes + '分 / 実績' + spent + '分）');
         });
 
-        const div = document.createElement('div');
-        div.className = 'p-4 rounded-xl advice-item text-2xl ' + (type === 'system'
-            ? 'bg-gray-100 text-gray-600'
-            : 'bg-blue-50 border border-blue-200 text-blue-900 shadow-sm');
-        div.textContent = text;
-        aiAdviceContent.prepend(div);
+        const deferred = meeting.topics.filter(t => t.outcome !== '決まった');
+        lines.push('');
+        lines.push('## 次回に持ち越し');
+        if (deferred.length) deferred.forEach(t => lines.push('- ' + t.title));
+        else lines.push('- なし');
 
-        while (aiAdviceContent.children.length > 8) {
-            aiAdviceContent.lastChild.remove();
-        }
-        return div;
-    }
-
-    function maybeFetchAdvice() {
-        if (isFetchingAdvice) return;
-        if (Date.now() - lastAdviceAt < ADVICE_COOLDOWN_MS) return;
-        if (fullTranscript.length - lastAdviceIndex < ADVICE_THRESHOLD_CHARS) return;
-
-        lastAdviceIndex = fullTranscript.length;
-        lastAdviceAt = Date.now();
-        isFetchingAdvice = true;
-        // 直近のみ送る。全文を毎回送ると会議が長引くほど膨らみ429を招いていた
-        const context = fullTranscript.slice(-MAX_CONTEXT_CHARS);
-        callGeminiForAdvice(context).finally(() => { isFetchingAdvice = false; });
-    }
-
-    async function callGeminiForAdvice(transcript) {
-        const prompt = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
-        try {
-            const res = await callGemini({
-                contents: [{ parts: [{ text: prompt + '\n\n【直近の会話】\n' + transcript }] }],
-                generationConfig: { temperature: 0.4, maxOutputTokens: 120 }
-            });
-            if (!res.ok) {
-                if (res.status === 429) return; // クォータ。次の周期まで黙って待つ
-                throw new Error('API ' + res.status);
-            }
-            const text = extractText(await res.json());
-            // 「―」= 指摘なし。会議中の画面は静かなままにする
-            if (!text || text === '―' || text === '-' || text === 'ー') return;
-            addAdvice(text);
-        } catch (e) {
-            console.error('Advice error:', e);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Summary / export
-    // ------------------------------------------------------------------
-    function pad2(n) { return String(n).padStart(2, '0'); }
-
-    function fmtElapsed(ms) {
-        const s = Math.max(0, Math.floor(ms / 1000));
-        return pad2(Math.floor(s / 60)) + ':' + pad2(s % 60);
-    }
-
-    function buildTranscriptText() {
-        const all = [
-            ...segments.map(s => ({ t: s.t, line: s.text })),
-            ...markers.map(m => ({ t: m.t, line: '>>> マーカー' }))
+        const rows = [
+            ...meeting.notices.map(n => ({ t: n.t, s: '[' + n.kind + '] ' + n.title })),
+            ...meeting.markers.map(m => ({ t: m.t, s: '[マーク] 手動' })),
+            ...heat.events.map(e => ({
+                t: e.t,
+                s: '[温度:' + e.level + '] ' + e.kind +
+                   '（応酬' + e.turnCount + '回 平常比' + e.rateRatio + '倍 ' + e.levelDelta + 'dB）'
+            }))
         ].sort((a, b) => a.t - b.t);
-        if (!all.length) return '';
-        const t0 = sessionStartedAt || all[0].t;
-        const header = '会議記録 ' + new Date(t0).toLocaleString('ja-JP') + '\n\n';
-        return header + all.map(r => '[' + fmtElapsed(r.t - t0) + '] ' + r.line).join('\n') + '\n';
+
+        lines.push('');
+        lines.push('## 出来事（文字起こしとの突き合わせ用）');
+        rows.forEach(r => lines.push(
+            fmtClock(r.t - meeting.startedAt) + '  ' +
+            new Date(r.t).toLocaleTimeString('ja-JP') + '  ' + r.s
+        ));
+
+        // 会議中に出さなかったからといって、起きなかったことにはしない。
+        // 画面に出す回数は絞る一方で、記録には必ず残す。
+        const sup = heat.suppressed || [];
+        if (sup.length) {
+            lines.push('');
+            lines.push('## 会議中は出さなかったもの（' + sup.length + '件）');
+            sup.forEach(s => lines.push(
+                fmtClock(s.t - meeting.startedAt) + '  ' + s.kind + '（' + s.levelDelta + 'dB）'
+            ));
+        }
+
+        lines.push('');
+        lines.push('--- 生データ ---');
+        lines.push(JSON.stringify({ meeting, heat }));
+        return lines.join('\n');
     }
 
-    function downloadFile(filename, text) {
-        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    function renderDone() {
+        const ul = $('doneTopics');
+        ul.innerHTML = '';
+        meeting.topics.forEach(t => {
+            const spent = t.endedAt && t.startedAt ? Math.round((t.endedAt - t.startedAt) / 60000) : 0;
+            const li = document.createElement('li');
+            li.className = t.outcome === '決まった' ? 'ok' : 'pending';
+            li.textContent = t.title + ' — ' + (t.outcome || '未着手') +
+                '（' + spent + '分 / 予定' + t.minutes + '分）';
+            ul.appendChild(li);
+        });
+    }
+
+    $('exportBtn').addEventListener('click', () => {
+        const d = new Date(meeting.startedAt);
+        const p = (n) => String(n).padStart(2, '0');
+        // 日本語ファイル名は環境により download 属性ごと無視されるため ASCII
+        const name = 'meeting-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) +
+            '-' + p(d.getHours()) + p(d.getMinutes()) + '.md';
+        const blob = new Blob([buildReport()], { type: 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = filename;
+        a.download = name;
         document.body.appendChild(a);
         a.click();
-        // 即 remove するとダウンロードが始まる前に download 属性を失い、
-        // 「download」という拡張子なしのファイルになる。破棄は遅らせる。
-        setTimeout(() => {
-            a.remove();
-            URL.revokeObjectURL(url);
-        }, 2000);
-    }
-
-    function stamp() {
-        const d = new Date(sessionStartedAt || Date.now());
-        return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes());
-    }
-
-    async function generateSummary(isFinal) {
-        const loadingText = loadingOverlay.querySelector('p');
-        if (loadingText) loadingText.textContent = isFinal ? '議事録を生成しています…' : '途中要約を生成しています…';
-        loadingOverlay.classList.remove('hidden');
-        loadingOverlay.classList.add('flex');
-
-        const prompt = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
-        const webhookUrl = localStorage.getItem('webhookUrl');
-
-        try {
-            const res = await callGemini({
-                contents: [{ parts: [{ text: prompt + '\n\n【会議ログ】\n' + buildTranscriptText() }] }],
-                generationConfig: { temperature: 0.2 }
-            });
-            if (!res.ok) throw new Error('API ' + res.status);
-            const markdown = extractText(await res.json());
-            if (!markdown) throw new Error('空の応答');
-
-            minutesModalTitle.textContent = isFinal ? '生成された議事録' : '途中要約';
-            minutesOutput.textContent = markdown;
-            minutesModal.classList.remove('hidden');
-            downloadMinutesBtn.disabled = false;
-
-            if (isFinal && webhookUrl) {
-                fetch(webhookUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: markdown })
-                }).catch(err => console.error('Webhook POST error', err));
-            }
-        } catch (e) {
-            console.error(e);
-            // 生成に失敗しても記録は残っている。書き出し導線を必ず案内する
-            alert('議事録の生成に失敗しました（' + e.message + '）。\n文字起こしは保存されています。「文字起こしを保存」から書き出せます。');
-        } finally {
-            loadingOverlay.classList.add('hidden');
-            loadingOverlay.classList.remove('flex');
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Modals / settings
-    // ------------------------------------------------------------------
-    function initSettings() {
-        apiKeyInput.value = localStorage.getItem('geminiApiKey') || '';
-        webhookUrlInput.value = localStorage.getItem('webhookUrl') || '';
-        realtimePromptInput.value = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
-        minutesPromptInput.value = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
-        if (!apiKeyInput.value) settingsModal.classList.remove('hidden');
-        try {
-            const cached = JSON.parse(localStorage.getItem(MODEL_CACHE_KEY) || 'null');
-            if (cached && cached.model) showModelInSettings(cached.model);
-        } catch (e) { /* 表示だけなので無視 */ }
-    }
-
-    settingsForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        // キーが変われば使えるモデルも変わりうるので選び直させる
-        if (apiKeyInput.value.trim() !== localStorage.getItem('geminiApiKey')) {
-            localStorage.removeItem(MODEL_CACHE_KEY);
-        }
-        localStorage.setItem('geminiApiKey', apiKeyInput.value.trim());
-        localStorage.setItem('webhookUrl', webhookUrlInput.value.trim());
-        localStorage.setItem('realtimePrompt', realtimePromptInput.value.trim());
-        localStorage.setItem('minutesPrompt', minutesPromptInput.value.trim());
-        settingsModal.classList.add('hidden');
+        setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 2000);
     });
 
-    settingsBtn.addEventListener('click', () => settingsModal.classList.remove('hidden'));
-    closeSettingsBtn.addEventListener('click', () => settingsModal.classList.add('hidden'));
-
-    closeMinutesBtn.addEventListener('click', () => {
-        // 記録は消さない。消えるのは「新しい会議を始める」時だけ
-        minutesModal.classList.add('hidden');
-    });
-
-    copyMinutesBtn.addEventListener('click', () => {
-        navigator.clipboard.writeText(minutesOutput.textContent).then(() => {
-            const original = copyMinutesBtn.textContent;
-            copyMinutesBtn.textContent = 'コピーしました';
-            setTimeout(() => { copyMinutesBtn.textContent = original; }, 2000);
+    $('copyBtn').addEventListener('click', () => {
+        navigator.clipboard.writeText(buildReport()).then(() => {
+            $('copyBtn').textContent = 'コピーしました';
+            setTimeout(() => { $('copyBtn').textContent = 'コピー'; }, 2000);
         });
     });
 
-    downloadMinutesBtn.addEventListener('click', () => {
-        // 日本語ファイル名は環境により download 属性ごと無視され、拡張子なしの
-        // 「download」になる。ASCII に固定する。
-        downloadFile('minutes-' + stamp() + '.md', minutesOutput.textContent);
+    $('newBtn').addEventListener('click', () => {
+        localStorage.removeItem(STORE);
+        location.reload();
     });
 
-    downloadTranscriptBtn.addEventListener('click', () => {
-        const text = buildTranscriptText();
-        if (!text) return alert('文字起こしがまだありません。');
-        downloadFile('transcript-' + stamp() + '.txt', text);
-    });
-
-    // 記録中の離脱で消えないよう、離れる直前に必ず書き込む
-    window.addEventListener('beforeunload', (e) => {
-        saveSession();
-        if (isRecording) {
-            e.preventDefault();
-            e.returnValue = '';
-        }
-    });
-
-    function initPWA() {
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js').catch(err => console.error('SW error', err));
-        }
+    // ------------------------------------------------------------------
+    // 保存と復元（落ちても失わない）
+    // ------------------------------------------------------------------
+    function save() {
+        try { localStorage.setItem(STORE, JSON.stringify(meeting)); } catch (e) { /* 満杯 */ }
     }
-});
+
+    function restore() {
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem(STORE) || 'null'); } catch (e) { return; }
+        if (!saved || !saved.topics || !saved.topics.length) return;
+
+        const when = new Date(saved.startedAt).toLocaleString('ja-JP',
+            { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        $('restoreLabel').textContent = when + ' の会議が途中のままです';
+        $('restoreBanner').hidden = false;
+
+        $('restoreBtn').addEventListener('click', () => {
+            meeting = saved;
+            if (saved.endedAt) {
+                renderDone();
+                show('done');
+            } else {
+                $('heatPanel').hidden = true;   // 音響は復元できない（マイクが切れている）
+                show('running');
+                ticker = setInterval(tick, 1000);
+                tick();
+            }
+        });
+        $('discardBtn').addEventListener('click', () => {
+            localStorage.removeItem(STORE);
+            $('restoreBanner').hidden = true;
+        });
+    }
+
+    $('startBtn').addEventListener('click', startMeeting);
+
+    window.addEventListener('beforeunload', (e) => {
+        if (meeting && !meeting.endedAt) { save(); e.preventDefault(); e.returnValue = ''; }
+    });
+
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+
+    restore();
+})();

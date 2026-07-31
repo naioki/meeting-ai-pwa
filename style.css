@@ -1,36 +1,210 @@
-/* Tailwind は CDN 読み込みのため、回線状況によっては間に合わない/失敗する。
-   その場合 .hidden が無効化され、モーダルも隠しボタンも全部表示されてしまうので、
-   表示制御だけはローカルCSSで必ず効くようにしておく。 */
-.hidden {
-    display: none !important;
+/* Tailwind CDN への依存を撤去した。
+   CDN が遅い/不通なだけで表示制御が壊れ、画面が崩壊していたため。
+   このページは外部リソースを一切読まない。 */
+
+:root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --line: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --calm: #38bdf8;
+    --warm: #fbbf24;
+    --hot: #f87171;
+    --ok: #4ade80;
 }
 
-/* Custom scrollbar to make it look clean */
-::-webkit-scrollbar {
-    width: 6px;
-}
-::-webkit-scrollbar-track {
-    background: transparent;
-}
-::-webkit-scrollbar-thumb {
-    background: #cbd5e1;
-    border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: #94a3b8;
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.6;
 }
 
-/* Animations for new AI advice */
-@keyframes slideDownIn {
-    0% {
-        opacity: 0;
-        transform: translateY(-20px);
-    }
-    100% {
-        opacity: 1;
-        transform: translateY(0);
-    }
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.9rem 1.25rem;
+    border-bottom: 1px solid var(--line);
 }
-.advice-item {
-    animation: slideDownIn 0.3s ease-out forwards;
+header h1 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 0.04em;
 }
+.total { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+
+main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+}
+
+h2 { margin: 0; font-size: 1.15rem; }
+
+.hint, .note {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin: 0;
+}
+.hint strong, .note strong { color: var(--text); }
+
+textarea {
+    width: 100%;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 0.75rem;
+    padding: 0.9rem;
+    font: inherit;
+    font-size: 1rem;
+    resize: vertical;
+}
+textarea:focus { outline: 2px solid var(--calm); outline-offset: 1px; }
+
+.check {
+    display: flex;
+    gap: 0.7rem;
+    align-items: flex-start;
+    background: var(--panel);
+    border-radius: 0.75rem;
+    padding: 0.9rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+.check input { margin-top: 0.3rem; flex-shrink: 0; }
+.check small { display: block; color: var(--muted); font-size: 0.78rem; }
+
+/* --- 会議中 --- */
+.panel {
+    background: var(--panel);
+    border-radius: 1rem;
+    padding: 1.5rem;
+    text-align: center;
+}
+.topic-head { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.75rem; }
+.topic-index { color: var(--muted); font-size: 0.78rem; }
+.topic-title { font-size: 1.3rem; font-weight: 700; }
+
+.clock {
+    font-size: 3.5rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--calm);
+    line-height: 1.1;
+    transition: color 0.4s ease;
+}
+.clock.warn { color: var(--warm); }
+.clock.over { color: var(--hot); }
+
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 1rem; }
+.bar-fill { height: 100%; width: 0; background: var(--calm); transition: width 0.9s linear; }
+.bar-fill.warn { background: var(--warm); }
+.bar-fill.over { background: var(--hot); }
+
+/* 温度が上がった時、または時間の節目にだけ出る */
+.notice {
+    border-radius: 1rem;
+    padding: 1.4rem;
+    animation: rise 0.25s ease-out;
+}
+.notice.time { background: #1e3a5f; border: 1px solid var(--calm); }
+.notice.heat { background: #451a03; border: 1px solid var(--warm); }
+@keyframes rise {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.notice-title { font-size: 0.8rem; font-weight: 700; margin-bottom: 0.6rem; color: var(--muted); }
+.notice.heat .notice-title { color: var(--warm); }
+.notice-line { font-size: 1.5rem; font-weight: 700; line-height: 1.5; }
+.dismiss {
+    margin-top: 1rem;
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    padding: 0.45rem 0.9rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.82rem;
+}
+
+.heat { background: var(--panel); border-radius: 1rem; padding: 1rem 1.25rem; text-align: center; }
+.heat-state { font-size: 1.05rem; font-weight: 700; transition: color 0.4s ease; }
+.heat-state.calm { color: var(--calm); }
+.heat-state.warm { color: var(--warm); }
+.heat-state.hot  { color: var(--hot); }
+.meter { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin: 0.7rem 0 0.5rem; }
+.meter-fill { height: 100%; width: 0; background: var(--calm); transition: width 0.1s linear; }
+.heat-stats { color: var(--muted); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+
+/* --- ボタン --- */
+.controls { display: flex; gap: 0.7rem; flex-wrap: wrap; }
+.btn {
+    flex: 1 1 8rem;
+    padding: 1rem;
+    border: none;
+    border-radius: 0.8rem;
+    font: inherit;
+    font-size: 1rem;
+    font-weight: 700;
+    color: #fff;
+    cursor: pointer;
+    transition: transform 0.1s ease, opacity 0.2s ease;
+}
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.35; cursor: default; }
+.btn.big { width: 100%; padding: 1.2rem; font-size: 1.1rem; }
+.btn.small { flex: 0 0 auto; padding: 0.45rem 0.9rem; font-size: 0.82rem; }
+
+.primary { background: #0284c7; }
+.warn    { background: #b45309; }
+.stop    { background: #b91c1c; }
+.mark    { background: #7c3aed; }
+.ghost   { background: none; border: 1px solid var(--line); color: var(--muted); font-weight: 500; }
+
+/* --- 会議後 --- */
+.results { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.results li {
+    background: var(--panel);
+    border-left: 3px solid var(--line);
+    border-radius: 0.5rem;
+    padding: 0.8rem 1rem;
+    font-size: 0.95rem;
+}
+.results li.ok { border-left-color: var(--ok); }
+.results li.pending { border-left-color: var(--warm); }
+
+.restore {
+    background: #422006;
+    border: 1px solid #78350f;
+    border-radius: 0.75rem;
+    padding: 0.9rem 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+}
+.restore-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+
+.error {
+    background: #7f1d1d;
+    color: #fecaca;
+    padding: 0.8rem 1rem;
+    border-radius: 0.6rem;
+    font-size: 0.87rem;
+}
+
+[hidden] { display: none !important; }
