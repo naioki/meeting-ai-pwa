@@ -1,56 +1,53 @@
-const CACHE_NAME = 'ai-meeting-v3';
+const CACHE_NAME = 'ai-meeting-v4';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './style.css',
   './app.js',
   './manifest.json',
-  './icon.png'
+  './icon-192.png',
+  './icon-512.png',
+  'https://cdn.tailwindcss.com'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(ASSETS_TO_CACHE))
+      // 1つでも失敗すると全体が落ちるので個別に入れる（CDNが不通でもインストールは成功させる）
+      .then((cache) => Promise.all(
+        ASSETS_TO_CACHE.map((url) => cache.add(url).catch((e) => console.warn('cache skip', url, e)))
+      ))
       .then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cache) => {
-          if (cache !== CACHE_NAME) {
-            return caches.delete(cache);
-          }
-        })
-      );
-    })
+    caches.keys()
+      .then((names) => Promise.all(
+        names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
+      ))
+      .then(() => self.clients.claim())
   );
-  return self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
-  // We only cache GET requests
   if (event.request.method !== 'GET') return;
-  // Exclude API calls like the Gemini API
+  // Gemini API は常にネットワークへ
   if (event.request.url.includes('googleapis.com')) return;
-  
-  // Network-First strategy
+
+  // Network-First（更新を取りこぼさない）／失敗時はキャッシュへ
   event.respondWith(
-    fetch(event.request).then((response) => {
-      // If we got a valid response, clone it and cache it for offline use
-      if(response && response.status === 200 && response.type === 'basic') {
-          let responseClone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseClone);
-          });
-      }
-      return response;
-    }).catch(function() {
-      // Fallback to cache if offline
-      return caches.match(event.request);
-    })
+    fetch(event.request)
+      .then((response) => {
+        // basic だけでなく cors も保存する。Tailwind CDN が保存されず、
+        // オフライン時に完全に無スタイルになっていた
+        if (response && response.ok && (response.type === 'basic' || response.type === 'cors')) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });

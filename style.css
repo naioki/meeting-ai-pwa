@@ -1,3 +1,10 @@
+/* Tailwind は CDN 読み込みのため、回線状況によっては間に合わない/失敗する。
+   その場合 .hidden が無効化され、モーダルも隠しボタンも全部表示されてしまうので、
+   表示制御だけはローカルCSSで必ず効くようにしておく。 */
+.hidden {
+    display: none !important;
+}
+
 /* Custom scrollbar to make it look clean */
 ::-webkit-scrollbar {
     width: 6px;

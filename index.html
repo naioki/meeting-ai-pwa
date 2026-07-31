@@ -7,7 +7,7 @@
     <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="apple-touch-icon" href="icon.png">
+    <link rel="apple-touch-icon" href="icon-192.png">
     <meta name="theme-color" content="#3b82f6">
 </head>
 <body class="bg-gray-50 text-gray-800 font-sans h-screen flex flex-col antialiased">
@@ -17,6 +17,7 @@
         <div class="flex items-center">
             <h1 class="text-xl font-bold text-gray-700">AIアシスタント</h1>
             <span id="recordingStatusIndicator" class="ml-3 text-xs font-bold px-3 py-1 bg-gray-200 text-gray-600 rounded-full transition-colors hidden">待機中</span>
+            <span id="savedIndicator" class="ml-3 text-xs text-gray-400 hidden"></span>
         </div>
         <button id="settingsBtn" class="p-2 text-gray-500 hover:bg-gray-100 rounded-full transition" aria-label="設定">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -28,14 +29,29 @@
 
     <!-- Main Container -->
     <main class="flex-1 flex flex-col overflow-hidden relative">
-        
+
+        <!-- Restore banner -->
+        <div id="restoreBanner" class="hidden mx-4 mt-4 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-4 shrink-0">
+            <span id="restoreLabel" class="text-sm text-amber-900"></span>
+            <div class="shrink-0 space-x-2">
+                <button id="restoreBtn" class="bg-amber-500 hover:bg-amber-600 text-white text-sm font-bold py-2 px-4 rounded-lg transition">復元する</button>
+                <button id="discardBtn" class="text-amber-700 hover:bg-amber-100 text-sm py-2 px-3 rounded-lg transition">破棄</button>
+            </div>
+        </div>
+
         <!-- Controls -->
-        <div class="px-4 py-6 shrink-0 flex justify-center space-x-4">
+        <div class="px-4 py-6 shrink-0 flex justify-center flex-wrap gap-3">
             <button id="startBtn" class="flex-1 max-w-xs bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-2xl shadow-lg transition transform active:scale-95 text-xl flex justify-center items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                 </svg>
                 会議スタート
+            </button>
+            <button id="markBtn" class="flex-1 max-w-xs bg-purple-600 hover:bg-purple-700 text-white font-bold py-4 px-2 rounded-2xl shadow-lg transition transform active:scale-95 text-lg hidden flex justify-center items-center" title="気になった瞬間に押す">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9" />
+                </svg>
+                <span>ここをマーク</span>
             </button>
             <button id="midwaySummaryBtn" class="flex-1 max-w-xs bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-2 rounded-2xl shadow-lg transition transform active:scale-95 text-lg hidden flex justify-center items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -70,7 +86,10 @@
         <!-- Transcription Log -->
         <div class="h-1/3 shrink-0 px-4 pb-4">
             <div class="h-full bg-gray-100 rounded-2xl p-4 overflow-y-auto border border-gray-200">
-                <h3 class="text-sm font-semibold text-gray-500 mb-2 sticky top-0 bg-gray-100">文字起こしログ</h3>
+                <div class="flex justify-between items-center mb-2 sticky top-0 bg-gray-100 py-1">
+                    <h3 class="text-sm font-semibold text-gray-500">文字起こしログ</h3>
+                    <button id="downloadTranscriptBtn" class="text-xs text-gray-500 hover:text-gray-800 border border-gray-300 rounded-md px-2 py-1 transition disabled:opacity-40" disabled>文字起こしを保存</button>
+                </div>
                 <div id="transcriptContent" class="text-base text-gray-700 whitespace-pre-wrap"></div>
             </div>
         </div>
@@ -134,6 +153,7 @@
             </div>
             <div class="shrink-0 flex justify-end space-x-3">
                 <button id="copyMinutesBtn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg transition">クリップボードにコピー</button>
+                <button id="downloadMinutesBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition disabled:opacity-40" disabled>.md で保存</button>
             </div>
         </div>
     </div>
