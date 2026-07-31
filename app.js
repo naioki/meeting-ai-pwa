@@ -15,6 +15,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const ADVICE_COOLDOWN_MS = 45000;     // 429対策: API呼び出しの下限間隔
     const MAX_CONTEXT_CHARS = 3000;       // 毎回全文を送らない（会議が長引くほど膨らむのを防ぐ）
     const STORAGE_KEY = 'meetingSession.v1';
+    const MODEL_CACHE_KEY = 'geminiModel.v1';
+    const MODEL_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+    const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
     const SAVE_DEBOUNCE_MS = 800;
     const WATCHDOG_INTERVAL_MS = 3000;    // 認識エンジンの死活監視
 
@@ -382,6 +385,80 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ------------------------------------------------------------------
+    // Gemini モデルの自動解決
+    //
+    // モデル名をハードコードすると、Google が世代交代させるたびに 404 になり
+    // 追いかけ続けることになる（このリポジトリのコミット履歴がその記録）。
+    // 起動時に一覧を取得し、使えるものから自動で選ぶ。
+    // ------------------------------------------------------------------
+    function scoreModel(name) {
+        const n = name.replace(/^models\//, '');
+        if (!/^gemini-/.test(n)) return -1;
+        // 生成以外の用途（埋め込み・画像・音声合成・Live 等）は除外
+        if (/(embedding|aqa|imagen|image|tts|veo|live|native-audio|computer-use)/.test(n)) return -1;
+
+        const ver = parseFloat((n.match(/^gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0');
+        let tier;
+        if (/flash-lite/.test(n)) tier = 3;        // 最安。無料枠があり、会議中の短い判定には十分
+        else if (/flash/.test(n)) tier = 2;
+        else if (/pro/.test(n)) tier = 1;          // 高価。他が無い時だけ
+        else return -1;
+
+        // この用途では「安定 > 安い > 新しい」。最新の preview に飛びつかない
+        const stable = /(preview|exp|-\d{3,})/.test(n) ? 0 : 1;
+        return stable * 1000 + tier * 100 + ver;
+    }
+
+    async function resolveModel(apiKey, force) {
+        if (!force) {
+            try {
+                const cached = JSON.parse(localStorage.getItem(MODEL_CACHE_KEY) || 'null');
+                if (cached && Date.now() - cached.at < MODEL_CACHE_TTL_MS) return cached.model;
+            } catch (e) { /* 壊れていたら取り直す */ }
+        }
+
+        const res = await fetch(API_BASE + '/models?key=' + encodeURIComponent(apiKey) + '&pageSize=200');
+        if (!res.ok) throw new Error('モデル一覧の取得に失敗 (' + res.status + ')');
+        const data = await res.json();
+
+        const best = (data.models || [])
+            .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+            .map(m => ({ name: m.name, score: scoreModel(m.name) }))
+            .filter(m => m.score > 0)
+            .sort((a, b) => b.score - a.score)[0];
+
+        if (!best) throw new Error('利用できるモデルが見つかりません');
+        const model = best.name.replace(/^models\//, '');
+        localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({ model, at: Date.now() }));
+        showModelInSettings(model);
+        return model;
+    }
+
+    function showModelInSettings(model) {
+        const el = document.getElementById('modelIndicator');
+        if (el) el.textContent = '使用中のモデル: ' + model;
+    }
+
+    async function callGemini(body) {
+        const apiKey = localStorage.getItem('geminiApiKey');
+        const post = (model) => fetch(
+            API_BASE + '/models/' + model + ':generateContent?key=' + encodeURIComponent(apiKey),
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+        );
+
+        let res = await post(await resolveModel(apiKey));
+        if (res.status === 404) {
+            // 選んだモデルが廃止された。一覧を取り直して一度だけやり直す
+            res = await post(await resolveModel(apiKey, true));
+        }
+        return res;
+    }
+
+    function extractText(data) {
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    }
+
+    // ------------------------------------------------------------------
     // AI advice（積み上げない・全文を送らない・連射しない）
     // ------------------------------------------------------------------
     function addAdvice(text, type = 'ai') {
@@ -418,26 +495,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function callGeminiForAdvice(transcript) {
-        const apiKey = localStorage.getItem('geminiApiKey');
         const prompt = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
         try {
-            const res = await fetch(
-                'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + encodeURIComponent(apiKey),
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt + '\n\n【直近の会話】\n' + transcript }] }],
-                        generationConfig: { temperature: 0.4, maxOutputTokens: 120 }
-                    })
-                }
-            );
+            const res = await callGemini({
+                contents: [{ parts: [{ text: prompt + '\n\n【直近の会話】\n' + transcript }] }],
+                generationConfig: { temperature: 0.4, maxOutputTokens: 120 }
+            });
             if (!res.ok) {
                 if (res.status === 429) return; // クォータ。次の周期まで黙って待つ
                 throw new Error('API ' + res.status);
             }
-            const data = await res.json();
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+            const text = extractText(await res.json());
             // 「―」= 指摘なし。会議中の画面は静かなままにする
             if (!text || text === '―' || text === '-' || text === 'ー') return;
             addAdvice(text);
@@ -494,25 +562,16 @@ document.addEventListener('DOMContentLoaded', () => {
         loadingOverlay.classList.remove('hidden');
         loadingOverlay.classList.add('flex');
 
-        const apiKey = localStorage.getItem('geminiApiKey');
         const prompt = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
         const webhookUrl = localStorage.getItem('webhookUrl');
 
         try {
-            const res = await fetch(
-                'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + encodeURIComponent(apiKey),
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt + '\n\n【会議ログ】\n' + buildTranscriptText() }] }],
-                        generationConfig: { temperature: 0.2 }
-                    })
-                }
-            );
+            const res = await callGemini({
+                contents: [{ parts: [{ text: prompt + '\n\n【会議ログ】\n' + buildTranscriptText() }] }],
+                generationConfig: { temperature: 0.2 }
+            });
             if (!res.ok) throw new Error('API ' + res.status);
-            const data = await res.json();
-            const markdown = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const markdown = extractText(await res.json());
             if (!markdown) throw new Error('空の応答');
 
             minutesModalTitle.textContent = isFinal ? '生成された議事録' : '途中要約';
@@ -546,10 +605,18 @@ document.addEventListener('DOMContentLoaded', () => {
         realtimePromptInput.value = localStorage.getItem('realtimePrompt') || DEFAULT_REALTIME_PROMPT;
         minutesPromptInput.value = localStorage.getItem('minutesPrompt') || DEFAULT_MINUTES_PROMPT;
         if (!apiKeyInput.value) settingsModal.classList.remove('hidden');
+        try {
+            const cached = JSON.parse(localStorage.getItem(MODEL_CACHE_KEY) || 'null');
+            if (cached && cached.model) showModelInSettings(cached.model);
+        } catch (e) { /* 表示だけなので無視 */ }
     }
 
     settingsForm.addEventListener('submit', (e) => {
         e.preventDefault();
+        // キーが変われば使えるモデルも変わりうるので選び直させる
+        if (apiKeyInput.value.trim() !== localStorage.getItem('geminiApiKey')) {
+            localStorage.removeItem(MODEL_CACHE_KEY);
+        }
         localStorage.setItem('geminiApiKey', apiKeyInput.value.trim());
         localStorage.setItem('webhookUrl', webhookUrlInput.value.trim());
         localStorage.setItem('realtimePrompt', realtimePromptInput.value.trim());
